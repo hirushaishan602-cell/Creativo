@@ -36,7 +36,7 @@ let unsubInquiries = null;
 // Admin UIDs - Firebase console eka balala admin users ge UID danna
 const ADMIN_UIDS = [
               '5Tp9xmfgY4MofJOP88S29RNYTyH3'
-  // Example: '5Tp9xmfgY4MofJOP88S29RNYTyH3'
+  // Example: 'abc123uid456def789'
   // Oyage admin account ge UID ekka danna - Firebase Console > Authentication > Users
 ];
 function isAdmin(){ return CU && ADMIN_UIDS.includes(CU.uid); }
@@ -140,6 +140,53 @@ window.doSignIn = async function(){
   }catch(e){showToast('❌ Incorrect email or password.');}
 };
 
+// ── HERO STATS (realtime counts) ────────────────────────────
+window.loadHeroStats = async function(){
+  try{
+    // Parallel fetch: users, projects, inquiries
+    const [usersSnap, projectsSnap, inquiriesSnap] = await Promise.all([
+      getDocs(collection(db,'users')),
+      getDocs(collection(db,'projects')),
+      getDocs(collection(db,'inquiries'))
+    ]);
+    const creativeCount  = usersSnap.size;
+    const projectCount   = projectsSnap.size;
+    // Unique senders (clients) from inquiries
+    const senderSet = new Set();
+    inquiriesSnap.docs.forEach(d=>{ const wa=d.data().whatsapp; if(wa) senderSet.add(wa); });
+    const clientCount = senderSet.size;
+
+    // Animate counters
+    animateCount('statCreatives', creativeCount, '', '+');
+    animateCount('statProjects',  projectCount,  '', '+');
+    animateCount('statClients',   clientCount,   '', '+');
+    animateCount('statHireRate',  94,            '', '%');
+  }catch(e){
+    // Fallback to sensible defaults on error
+    document.getElementById('statCreatives').textContent='840+';
+    document.getElementById('statProjects').textContent='2,300+';
+    document.getElementById('statClients').textContent='380+';
+    document.getElementById('statHireRate').textContent='94%';
+  }
+};
+
+function animateCount(elId, target, prefix, suffix){
+  const el = document.getElementById(elId);
+  if(!el) return;
+  const duration = 1600; // ms
+  const start = performance.now();
+  const startVal = 0;
+  function ease(t){ return t<.5?2*t*t:(-1+(4-2*t)*t); }
+  function step(now){
+    const t = Math.min((now - start) / duration, 1);
+    const val = Math.round(ease(t) * target);
+    el.textContent = prefix + (val >= 1000 ? (val/1000).toFixed(1).replace(/\.0$/,'') + 'K' : val) + suffix;
+    if(t < 1) requestAnimationFrame(step);
+    else el.textContent = prefix + (target >= 1000 ? (target/1000).toFixed(1).replace(/\.0$/,'') + 'K' : target) + suffix;
+  }
+  requestAnimationFrame(step);
+}
+
 window.doSignOut = async function(){
   await signOut(auth);
   showPage('discover');
@@ -177,9 +224,15 @@ window.doUpload = async function(){
       coverURL=await uploadToCloudinary(file);
       setUploadZoneLoading(false);
     }
+    // Upload thumbnail separately if provided
+    let thumbnailURL='';
+    if(window._thumbnailFile){
+      showToast('⏳ Uploading thumbnail...');
+      thumbnailURL=await uploadToCloudinary(window._thumbnailFile);
+    }
     const authorName=`${CUD?.firstName||''} ${CUD?.lastName||''}`.trim();
     await addDoc(collection(db,"projects"),{
-      title,category:cat,description:desc,coverURL,
+      title,category:cat,description:desc,coverURL,thumbnailURL,
       authorId:CU.uid,authorName,authorColor:CUD?.avatarColor||'#FF5C00',
       authorAvatarURL:CUD?.avatarURL||'',
       authorVerified:CUD?.verified||false,
@@ -204,7 +257,44 @@ function resetUploadZone(){
   document.getElementById('up_title').value='';
   document.getElementById('up_desc').value='';
   document.getElementById('up_file').value='';
+  document.getElementById('up_thumbnail').value='';
+  document.getElementById('thumbnailSection').style.display='none';
+  document.getElementById('thumbnailZone').innerHTML=`<div style="font-size:28px;margin-bottom:6px">🎞️</div><div style="font-size:13px;font-weight:500;color:var(--text)">Click to add thumbnail</div><div style="font-size:11px;color:var(--text-muted);margin-top:3px">JPG / PNG · Recommended 1280×720</div>`;
+  window._thumbnailFile = null;
 }
+
+const VIDEO_CATEGORIES = ['Video Edit','Motion Graphics','Reels / Shorts','Film / Cinematic','3D & VFX','Wedding & Events'];
+
+window.toggleThumbnailSection = function(cat){
+  const sec = document.getElementById('thumbnailSection');
+  const fileLabel = document.getElementById('upFileLabel');
+  if(VIDEO_CATEGORIES.includes(cat)){
+    sec.style.display = 'block';
+    fileLabel.textContent = 'Video File';
+  } else {
+    sec.style.display = 'none';
+    fileLabel.textContent = 'Project File';
+  }
+};
+
+window.previewThumbnail = function(input){
+  const file = input.files[0];
+  if(!file) return;
+  window._thumbnailFile = file;
+  const zone = document.getElementById('thumbnailZone');
+  const r = new FileReader();
+  r.onload = e => {
+    zone.innerHTML = `<img src="${e.target.result}" style="max-height:130px;border-radius:8px;object-fit:contain;display:block;margin:0 auto"><p style="margin-top:6px;font-size:11px;color:var(--text-muted)">${file.name} · ${(file.size/1024/1024).toFixed(1)}MB <span onclick="clearThumbnail(event)" style="color:var(--orange);cursor:pointer;margin-left:8px">✕ Remove</span></p>`;
+  };
+  r.readAsDataURL(file);
+};
+
+window.clearThumbnail = function(e){
+  e && e.stopPropagation();
+  window._thumbnailFile = null;
+  document.getElementById('up_thumbnail').value = '';
+  document.getElementById('thumbnailZone').innerHTML = `<div style="font-size:28px;margin-bottom:6px">🎞️</div><div style="font-size:13px;font-weight:500;color:var(--text)">Click to add thumbnail</div><div style="font-size:11px;color:var(--text-muted);margin-top:3px">JPG / PNG · Recommended 1280×720</div>`;
+};
 
 // ── LOAD PUBLIC PROJECTS ────────────────────────────────────
 window.loadPublicProjects = async function(category='all'){
@@ -237,6 +327,7 @@ window.loadPublicProjects = async function(category='all'){
 
     const bgs=['linear-gradient(135deg,#f093fb,#f5576c)','linear-gradient(135deg,#4facfe,#00f2fe)','linear-gradient(135deg,#43e97b,#38f9d7)','linear-gradient(135deg,#fa709a,#fee140)','linear-gradient(135deg,#a18cd1,#fbc2eb)','linear-gradient(135deg,#667eea,#764ba2)','linear-gradient(135deg,#f7971e,#ffd200)'];
     grid.innerHTML=projects.map((p,i)=>projectCard(p,bgs[i%bgs.length])).join('');
+    loadUserLikes();
   }catch(e){grid.innerHTML=emptyState('⚠️','Could not load projects','Check your connection and try again.');}
 };
 
@@ -251,9 +342,28 @@ function projectCard(p,bg,isOwn){
     ? `<span title="Verified" style="background:#3b82f6;border-radius:50%;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0"><svg viewBox="0 0 24 24" width="8" height="8"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="white"/></svg></span>` : '';
   const proBadge = p.authorIsPro
     ? `<span style="background:var(--orange);color:white;border-radius:3px;padding:1px 5px;font-size:8px;font-weight:700;line-height:1.4">PRO</span>` : '';
+  // Thumbnail / video preview logic
+  const isVideo = p.coverURL && (p.coverURL.includes('/video/') || p.coverURL.match(/\.(mp4|mov|webm)/i));
+  let thumbHTML = '';
+  if(p.thumbnailURL){
+    // Custom thumbnail — static image always; play-icon overlay for videos
+    thumbHTML = `<img src="${p.thumbnailURL}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`;
+    if(isVideo) thumbHTML += `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none"><div style="width:46px;height:46px;background:rgba(0,0,0,.65);border-radius:50%;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="20" height="20"><polygon points="8,5 19,12 8,19" fill="white"/></svg></div></div>`;
+  } else if(isVideo){
+    // YouTube-style: video element shows first frame; hover plays
+    thumbHTML = `<video src="${p.coverURL}" style="width:100%;height:100%;object-fit:cover" muted playsinline preload="metadata"
+      onmouseover="this.play();this.nextElementSibling.style.opacity='0'" onmouseout="this.pause();this.currentTime=0;this.nextElementSibling.style.opacity='1'"></video>
+      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;transition:opacity .25s">
+        <div style="width:46px;height:46px;background:rgba(0,0,0,.65);border-radius:50%;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="20" height="20"><polygon points="8,5 19,12 8,19" fill="white"/></svg></div>
+      </div>`;
+  } else if(p.coverURL){
+    thumbHTML = `<img src="${p.coverURL}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`;
+  } else {
+    thumbHTML = `<span style="font-size:44px">🎨</span>`;
+  }
   return `<div class="portfolio-card" onclick="viewFirebaseProfile('${p.authorId||''}','${p.id}')">
     <div class="portfolio-thumb" style="background:${bg}">
-      ${p.coverURL?`<img src="${p.coverURL}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`:'<span style="font-size:44px">🎨</span>'}
+      ${thumbHTML}
       <div class="portfolio-thumb-overlay"></div>
     </div>
     <div class="portfolio-info">
@@ -266,8 +376,14 @@ function projectCard(p,bg,isOwn){
         <div class="creator-name" style="display:flex;align-items:center;gap:4px">${p.authorName||'Creative'} ${verifiedBadge} ${proBadge}</div>
       </div>
       <div class="portfolio-stats">
-        <div class="pstat"><strong>${p.views||0}</strong> views</div>
-        <div class="pstat"><strong id="lk_${p.id}">${p.likes||0}</strong> likes <button onclick="event.stopPropagation();likeProject('${p.id}')" style="border:none;background:none;cursor:pointer;font-size:13px;padding:0">❤️</button></div>
+        <div class="pstat">👁 <strong id="vw_${p.id}">${p.views||0}</strong> views</div>
+        <div class="pstat" style="display:flex;align-items:center;gap:4px">
+          <strong id="lk_${p.id}">${p.likes||0}</strong> likes
+          <button id="likeBtn_${p.id}" onclick="event.stopPropagation();likeProject('${p.id}',this)"
+            style="border:none;background:rgba(255,255,255,0.08);cursor:pointer;font-size:14px;padding:3px 7px;border-radius:20px;transition:transform 0.15s;line-height:1;margin-left:2px">
+            ${_likedSet&&_likedSet.has('${p.id}')?'❤️':'🤍'}
+          </button>
+        </div>
         ${isOwn?`<button onclick="event.stopPropagation();deleteProject('${p.id}')" style="margin-left:auto;border:none;background:rgba(239,68,68,0.15);color:#f87171;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">Delete</button>`:''}
       </div>
     </div>
@@ -275,12 +391,61 @@ function projectCard(p,bg,isOwn){
 }
 
 // ── LIKE ────────────────────────────────────────────────────
-window.likeProject = async function(id){
+// ── LIKES (toggle, no duplicates) ──────────────────────────
+const _likedSet = new Set(); // project ids liked this session
+
+window.likeProject = async function(id, btn){
+  if(!CU){ showToast('Sign in karanna like karanna!'); return; }
+  const likeDocRef = doc(db, 'likes', `${CU.uid}_${id}`);
+  const alreadyLiked = _likedSet.has(id);
   try{
-    await updateDoc(doc(db,"projects",id),{likes:increment(1)});
-    const el=document.getElementById('lk_'+id);
-    if(el) el.textContent=parseInt(el.textContent)+1;
-    showToast('❤️ Liked!');
+    if(alreadyLiked){
+      // Unlike
+      await deleteDoc(likeDocRef);
+      await updateDoc(doc(db,"projects",id),{likes:increment(-1)});
+      _likedSet.delete(id);
+      const el=document.getElementById('lk_'+id);
+      if(el) el.textContent=Math.max(0,parseInt(el.textContent)-1);
+      if(btn){ btn.textContent='🤍'; btn.style.transform='scale(1)'; }
+    } else {
+      // Like
+      await setDoc(likeDocRef,{userId:CU.uid,projectId:id,createdAt:serverTimestamp()});
+      await updateDoc(doc(db,"projects",id),{likes:increment(1)});
+      _likedSet.add(id);
+      const el=document.getElementById('lk_'+id);
+      if(el) el.textContent=parseInt(el.textContent)+1;
+      if(btn){
+        btn.textContent='❤️';
+        btn.style.transform='scale(1.4)';
+        setTimeout(()=>{ btn.style.transform='scale(1)'; },200);
+      }
+    }
+  }catch(e){ showToast('❌ '+e.message); }
+};
+
+// Load which projects current user has liked
+async function loadUserLikes(){
+  if(!CU) return;
+  try{
+    const snap = await getDocs(query(collection(db,'likes'),where('userId','==',CU.uid)));
+    snap.docs.forEach(d=>_likedSet.add(d.data().projectId));
+    // Update heart buttons already on screen
+    _likedSet.forEach(id=>{
+      const btn = document.getElementById('likeBtn_'+id);
+      if(btn) btn.textContent='❤️';
+    });
+  }catch(e){}
+}
+
+// ── INCREMENT VIEW on project open ─────────────────────────
+window.incrementView = async function(id){
+  const key = 'viewed_'+id;
+  if(sessionStorage.getItem(key)) return; // once per session
+  sessionStorage.setItem(key,'1');
+  try{
+    await updateDoc(doc(db,"projects",id),{views:increment(1)});
+    const el = document.getElementById('vw_'+id);
+    if(el) el.textContent = parseInt(el.textContent)+1;
   }catch(e){}
 };
 
@@ -336,6 +501,8 @@ window.openMyPortfolio = function(){
 
 window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
   if(!userId) return;
+  // Increment project view when card is clicked
+  if(projectId) incrementView(projectId);
   showPage('profile');
   document.getElementById('pvAvatar').innerHTML='⏳';
   document.getElementById('pvName').textContent='Loading…';
@@ -428,7 +595,50 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
         ${selfView?`<button class="btn btn-primary" onclick="openModal('upload')" style="margin-top:12px">Upload a project →</button>`:''}
       </div>`;
     } else {
-      pg.innerHTML=`<div class="portfolio-grid">${pDocs.map((p,i)=>projectCard(p,bgs[i%bgs.length],selfView)).join('')}</div>`;
+      // Merge live user verified/pro into projects
+      pDocs.forEach(p=>{ p.authorVerified=u.verified||false; p.authorIsPro=u.isPro||false; });
+      // Profile page cards — click opens media viewer, not profile navigation
+      const profileCards = pDocs.map((p,i)=>{
+        const bg2=bgs[i%bgs.length];
+        const isVideo2=p.coverURL&&(p.coverURL.includes('/video/')||p.coverURL.match(/\.(mp4|mov|webm)/i));
+        // thumbnailURL තිබ්බොත් ඒකම show කරනවා (video card වුනත්) — නැත්නම් coverURL
+        let thumbInner2='';
+        if(p.thumbnailURL){
+          thumbInner2=`<img src="${p.thumbnailURL}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`;
+          if(isVideo2) thumbInner2+=`<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none"><div style="width:46px;height:46px;background:rgba(0,0,0,.65);border-radius:50%;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="20" height="20"><polygon points="8,5 19,12 8,19" fill="white"/></svg></div></div>`;
+        } else if(p.coverURL){
+          if(isVideo2){
+            thumbInner2=`<video src="${p.coverURL}" style="width:100%;height:100%;object-fit:cover" muted playsinline preload="metadata" onmouseover="this.play();this.nextElementSibling.style.opacity='0'" onmouseout="this.pause();this.currentTime=0;this.nextElementSibling.style.opacity='1'"></video><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;transition:opacity .25s"><div style="width:46px;height:46px;background:rgba(0,0,0,.65);border-radius:50%;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="20" height="20"><polygon points="8,5 19,12 8,19" fill="white"/></svg></div></div>`;
+          } else {
+            thumbInner2=`<img src="${p.coverURL}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`;
+          }
+        } else {
+          thumbInner2='<span style="font-size:44px">&#127912;</span>';
+        }
+        const safeTitle2=(p.title||'').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+        const safeDesc2=(p.description||'').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+        const color2=p.authorColor||'#6B4EFF';
+        const ini2=(p.authorName||'?')[0];
+        const avatarStyle2=p.authorAvatarURL?`background-image:url(${p.authorAvatarURL});background-size:cover;background-position:center;background-color:transparent`:`background:${color2}`;
+        const avatarContent2=p.authorAvatarURL?'':ini2;
+        return `<div class="portfolio-card" onclick="openMediaViewer('${p.coverURL||''}','${safeTitle2}','${safeDesc2}',${p.likes||0},${p.views||0})">
+          <div class="portfolio-thumb" style="background:${bg2}">${thumbInner2}<div class="portfolio-thumb-overlay"></div></div>
+          <div class="portfolio-info">
+            <div class="portfolio-info-top"><div class="portfolio-title">${p.title}</div><span class="badge badge-gray" style="font-size:10px">${p.category||'Design'}</span></div>
+            <div class="portfolio-creator">
+              <div class="avatar" style="${avatarStyle2};width:26px;height:26px;font-size:10px">${avatarContent2}</div>
+              <div class="creator-name">${p.authorName||'Creative'}</div>
+            </div>
+            <div class="portfolio-stats">
+              <div class="pstat">&#128065; <strong>${p.views||0}</strong> views</div>
+              <div class="pstat"><strong>${p.likes||0}</strong> likes</div>
+              ${selfView?`<button onclick="event.stopPropagation();deleteProject('${p.id}')" style="margin-left:auto;border:none;background:rgba(239,68,68,0.15);color:#f87171;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">Delete</button>`:''}
+            </div>
+          </div>
+        </div>`;
+      }).join('');
+      pg.innerHTML=`<div class="portfolio-grid">${profileCards}</div>`;
+      loadUserLikes();
     }
   }catch(e){console.error(e);document.getElementById('pvName').textContent='Error loading profile';}
 };
@@ -436,6 +646,41 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
 window.copyPortfolioLink = function(uid){
   const url=`${location.origin}${location.pathname}#portfolio/${uid}`;
   navigator.clipboard.writeText(url).then(()=>showToast('🔗 Portfolio link copied!')).catch(()=>showToast('Copy failed'));
+};
+
+// ── MEDIA VIEWER (profile page project click) ───────────────
+window.openMediaViewer = function(coverURL, title, description, likes, views){
+  const overlay = document.getElementById('mediaViewerOverlay');
+  const mediaEl = document.getElementById('mediaViewerContent');
+  const titleEl = document.getElementById('mediaViewerTitle');
+  const descEl  = document.getElementById('mediaViewerDesc');
+  const statsEl = document.getElementById('mediaViewerStats');
+
+  // Determine if video or image
+  const isVideo = coverURL && (coverURL.includes('/video/') || coverURL.match(/\.(mp4|mov|webm)/i));
+
+  if(isVideo){
+    mediaEl.innerHTML=`<video src="${coverURL}" controls autoplay playsinline
+      style="max-width:100%;max-height:70vh;border-radius:12px;background:#000;display:block;margin:0 auto"></video>`;
+  } else if(coverURL){
+    mediaEl.innerHTML=`<img src="${coverURL}" alt="${title}"
+      style="max-width:100%;max-height:70vh;border-radius:12px;object-fit:contain;display:block;margin:0 auto">`;
+  } else {
+    mediaEl.innerHTML=`<div style="font-size:80px;text-align:center;padding:40px">🎨</div>`;
+  }
+
+  titleEl.textContent = title || '';
+  descEl.textContent  = description || '';
+  statsEl.textContent = `👁 ${views||0} views  ·  ❤️ ${likes||0} likes`;
+  overlay.classList.add('open');
+};
+
+window.closeMediaViewer = function(){
+  const overlay = document.getElementById('mediaViewerOverlay');
+  overlay.classList.remove('open');
+  // Stop any playing video
+  const vid = overlay.querySelector('video');
+  if(vid){ vid.pause(); vid.src=''; }
 };
 
 window.triggerBannerUpload = function(){ document.getElementById('bannerFileInput').click(); };
@@ -1038,6 +1283,7 @@ function emptyState(icon,title,sub,btnText,btnAction){
 document.addEventListener('DOMContentLoaded',()=>{
   loadPublicProjects();
   initUploadZone();
+  loadHeroStats();
 });
 
 window.initUploadZone=function(){
@@ -1401,10 +1647,10 @@ html{scroll-behavior:smooth;}
     </div>
   </div>
   <div class="stats-bar"><div class="stats-inner">
-    <div class="stat-item"><div class="stat-num">840+</div><div class="stat-label">Active Creatives</div></div>
-    <div class="stat-item"><div class="stat-num">2,300+</div><div class="stat-label">Projects Published</div></div>
-    <div class="stat-item"><div class="stat-num">380+</div><div class="stat-label">Clients & Brands</div></div>
-    <div class="stat-item"><div class="stat-num">94%</div><div class="stat-label">Hire Rate (Pro)</div></div>
+    <div class="stat-item"><div class="stat-num" id="statCreatives">—</div><div class="stat-label">Active Creatives</div></div>
+    <div class="stat-item"><div class="stat-num" id="statProjects">—</div><div class="stat-label">Projects Published</div></div>
+    <div class="stat-item"><div class="stat-num" id="statClients">—</div><div class="stat-label">Clients & Brands</div></div>
+    <div class="stat-item"><div class="stat-num" id="statHireRate">—</div><div class="stat-label">Hire Rate (Pro)</div></div>
   </div></div>
   <div class="section" id="discoverSection">
     <div class="section-header">
@@ -1728,7 +1974,7 @@ html{scroll-behavior:smooth;}
   <div class="form-group"><label class="form-label">Project Title</label><input type="text" id="up_title" class="form-input" placeholder="e.g. Brand Identity for Café Mango"></div>
   <div class="form-row">
     <div class="form-group"><label class="form-label">Category</label>
-      <select id="up_category" class="form-select">
+      <select id="up_category" class="form-select" onchange="toggleThumbnailSection(this.value)">
         <option>Graphic Design</option><option>Branding</option><option>Social Media</option>
         <option>Illustration</option><option>Video Edit</option><option>Motion Graphics</option>
         <option>Reels / Shorts</option><option>Film / Cinematic</option>
@@ -1740,13 +1986,33 @@ html{scroll-behavior:smooth;}
     </div>
   </div>
   <div class="form-group"><label class="form-label">Description</label><textarea id="up_desc" class="form-textarea" rows="3" placeholder="Tell us about this project…"></textarea></div>
-  <div class="upload-zone" id="uploadZone">
-    <div style="font-size:36px;margin-bottom:8px">📁</div>
-    <div style="font-size:14px;font-weight:500;color:var(--text)">Drop files here or click to upload</div>
-    <div style="font-size:12px;color:var(--text-muted);margin-top:4px">Images or Video · Max 50MB free / 250MB Pro</div>
+
+  <!-- Main file upload -->
+  <div class="form-group">
+    <label class="form-label" id="upFileLabel">Project File</label>
+    <div class="upload-zone" id="uploadZone">
+      <div style="font-size:36px;margin-bottom:8px">📁</div>
+      <div style="font-size:14px;font-weight:500;color:var(--text)">Drop files here or click to upload</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-top:4px">Images or Video · Max 50MB free / 250MB Pro</div>
+    </div>
+    <input type="file" id="up_file" accept="image/*,video/*" style="display:none">
   </div>
-  <input type="file" id="up_file" accept="image/*,video/mp4" style="display:none">
-  <button class="btn btn-primary" style="width:100%;justify-content:center;margin-top:16px;padding:12px" onclick="doUpload()">Publish Project</button>
+
+  <!-- Thumbnail section — shown only for video categories -->
+  <div id="thumbnailSection" style="display:none;margin-bottom:16px">
+    <label class="form-label" style="display:flex;align-items:center;gap:8px">
+      🖼️ Custom Thumbnail
+      <span style="font-size:11px;font-weight:400;color:var(--text-muted)">(optional — shows in Discover instead of video)</span>
+    </label>
+    <div class="upload-zone" id="thumbnailZone" style="min-height:110px" onclick="document.getElementById('up_thumbnail').click()">
+      <div style="font-size:28px;margin-bottom:6px">🎞️</div>
+      <div style="font-size:13px;font-weight:500;color:var(--text)">Click to add thumbnail</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:3px">JPG / PNG · Recommended 1280×720</div>
+    </div>
+    <input type="file" id="up_thumbnail" accept="image/*" style="display:none" onchange="previewThumbnail(this)">
+  </div>
+
+  <button class="btn btn-primary" style="width:100%;justify-content:center;margin-top:4px;padding:12px" onclick="doUpload()">Publish Project</button>
 </div>
 </div>
 
@@ -2016,6 +2282,18 @@ html{scroll-behavior:smooth;}
     </div>
   </div>
 </div>
+</div>
+
+
+<!-- ── MEDIA VIEWER OVERLAY ─────────────────────────────────── -->
+<div id="mediaViewerOverlay" class="modal-overlay" onclick="if(event.target===this)closeMediaViewer()" style="z-index:2000;align-items:center;justify-content:center;padding:16px">
+  <div style="background:var(--surface);border-radius:20px;width:100%;max-width:760px;max-height:90vh;overflow-y:auto;position:relative;padding:24px 24px 20px">
+    <button onclick="closeMediaViewer()" style="position:absolute;top:14px;right:16px;border:none;background:var(--surface2);color:var(--text);border-radius:50%;width:34px;height:34px;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center;z-index:1">✕</button>
+    <div id="mediaViewerContent" style="margin-bottom:16px"></div>
+    <div id="mediaViewerTitle" style="font-family:var(--font-display);font-size:18px;font-weight:700;color:var(--text);margin-bottom:6px"></div>
+    <div id="mediaViewerDesc" style="font-size:13px;color:var(--text-muted);margin-bottom:8px;line-height:1.6"></div>
+    <div id="mediaViewerStats" style="font-size:12px;color:var(--text-muted)"></div>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
