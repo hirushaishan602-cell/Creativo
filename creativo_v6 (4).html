@@ -1,0 +1,2149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Creativo · Sri Lanka Creative Portfolio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+
+<!-- Firebase + Cloudinary — same config as original -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getFirestore, collection, addDoc, getDocs, getDoc, doc, updateDoc, deleteDoc, increment, query, orderBy, where, serverTimestamp, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDS4WI7JSlwF9QZbX3ixzSaD-u8iXuI5wM",
+  authDomain: "creativo-68d96.firebaseapp.com",
+  projectId: "creativo-68d96",
+  storageBucket: "creativo-68d96.firebasestorage.app",
+  messagingSenderId: "257866398118",
+  appId: "1:257866398118:web:85ec18358e6f248d18f767"
+};
+const CLOUD = "drf1c9d3o";
+const PRESET = "pop8fruy";
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+let CU = null;   // current firebase user
+let CUD = null;  // current user firestore data
+let unsubInquiries = null;
+
+// ── ADMIN CONFIG ────────────────────────────────────────────
+// Admin UIDs - Firebase console eka balala admin users ge UID danna
+const ADMIN_UIDS = [
+              '5Tp9xmfgY4MofJOP88S29RNYTyH3'
+  // Example: '5Tp9xmfgY4MofJOP88S29RNYTyH3'
+  // Oyage admin account ge UID ekka danna - Firebase Console > Authentication > Users
+];
+function isAdmin(){ return CU && ADMIN_UIDS.includes(CU.uid); }
+
+// ── AUTH STATE ──────────────────────────────────────────────
+onAuthStateChanged(auth, async (user) => {
+  if (user) {
+    CU = user;
+    const snap = await getDoc(doc(db,"users",user.uid));
+    CUD = snap.exists() ? snap.data() : {};
+    updateNavLoggedIn();
+    if(document.getElementById('page-dashboard').classList.contains('active')) loadDashboard();
+    if(document.getElementById('page-jobs').classList.contains('active')) loadJobs();
+    subscribeInquiries();
+  } else {
+    CU = null; CUD = null;
+    updateNavLoggedOut();
+    if(unsubInquiries){ unsubInquiries(); unsubInquiries=null; }
+    document.getElementById('notifDot').style.display='none';
+  }
+});
+
+function updateNavLoggedIn(){
+  document.getElementById('navSignIn').style.display='none';
+  document.getElementById('navJoin').style.display='none';
+  document.getElementById('navDash').style.display='flex';
+  document.getElementById('navSignOut').style.display='flex';
+  const ini = (CUD?.firstName?.[0]||'')+(CUD?.lastName?.[0]||'');
+  const navAv = document.getElementById('navAvatar');
+  if(CUD?.avatarURL){
+    navAv.innerHTML=`<img src="${CUD.avatarURL}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
+    navAv.style.background='transparent';
+  } else {
+    navAv.innerHTML = ini||'👤';
+    navAv.style.background = CUD?.avatarColor||'#FF5C00';
+  }
+  document.getElementById('navMyPortfolio').style.display='inline';
+  document.getElementById('navUserName').textContent = CUD?.firstName||'Me';
+  // Admin tab show/hide
+  const adminTab = document.getElementById('adminNavTab');
+  if(adminTab) adminTab.style.display = isAdmin() ? 'flex' : 'none';
+}
+function updateNavLoggedOut(){
+  document.getElementById('navSignIn').style.display='';
+  document.getElementById('navJoin').style.display='';
+  document.getElementById('navDash').style.display='none';
+  document.getElementById('navSignOut').style.display='none';
+}
+
+// ── INQUIRY NOTIFICATIONS ───────────────────────────────────
+function subscribeInquiries(){
+  if(!CU) return;
+  const q = query(collection(db,"inquiries"), where("creativeId","==",CU.uid));
+  unsubInquiries = onSnapshot(q, snap => {
+    const cnt = snap.docs.filter(d=>d.data().read===false).length;
+    const dot = document.getElementById('notifDot');
+    const badge = document.getElementById('notifBadge');
+    const navBadge = document.getElementById('navNotifBadge');
+    dot.style.display = cnt>0?'flex':'none';
+    if(badge) badge.textContent = cnt;
+    if(navBadge){ navBadge.textContent=cnt; navBadge.style.display=cnt>0?'flex':'none'; }
+    if(cnt>0) document.getElementById('notifBtn').style.animation='pulse 1.5s infinite';
+    else document.getElementById('notifBtn').style.animation='none';
+  });
+}
+
+// ── SIGN UP ─────────────────────────────────────────────────
+window.doSignUp = async function(){
+  const fn=v('su_firstName'),ln=v('su_lastName'),em=v('su_email'),role=v('su_role'),pw=v('su_password');
+  if(!fn||!em||!pw||role==='Select your specialty'){showToast('⚠️ Please fill all fields');return;}
+  try{
+    showToast('Creating account...');
+    const cred=await createUserWithEmailAndPassword(auth,em,pw);
+    await updateProfile(cred.user,{displayName:`${fn} ${ln}`});
+    const colors=['#FF5C00','#6B4EFF','#00843B','#D4537E','#533AB7','#0066CC'];
+    const avatarColor=colors[Math.floor(Math.random()*colors.length)];
+    await setDoc(doc(db,"users",cred.user.uid),{
+      firstName:fn,lastName:ln,email:em,role,location:'Sri Lanka',bio:'',
+      tags:[],skills:[],socialLinks:{},isPro:false,verified:false,
+      profileViews:0,projectCount:0,totalLikes:0,avatarColor,
+      createdAt:serverTimestamp()
+    });
+    closeModal('auth');
+    showToast('✅ Welcome to Creativo, '+fn+'!');
+    showPage('dashboard');
+  }catch(e){
+    showToast('❌ '+(e.message.includes('email-already')?'Email already registered.':e.message));
+  }
+};
+
+// ── SIGN IN ─────────────────────────────────────────────────
+window.doSignIn = async function(){
+  const em=v('si_email'),pw=v('si_password');
+  if(!em||!pw){showToast('⚠️ Enter email and password');return;}
+  try{
+    showToast('Signing in...');
+    await signInWithEmailAndPassword(auth,em,pw);
+    closeModal('auth');
+    showToast('✅ Welcome back!');
+    showPage('dashboard');
+  }catch(e){showToast('❌ Incorrect email or password.');}
+};
+
+window.doSignOut = async function(){
+  await signOut(auth);
+  showPage('discover');
+  loadPublicProjects();
+  showToast('Signed out.');
+};
+
+// ── CLOUDINARY UPLOAD ───────────────────────────────────────
+async function uploadToCloudinary(file){
+  const fd=new FormData();
+  fd.append('file',file);
+  fd.append('upload_preset',PRESET);
+  fd.append('folder','creativo_projects');
+  const res=await fetch(`https://api.cloudinary.com/v1_1/${CLOUD}/auto/upload`,{method:'POST',body:fd});
+  if(!res.ok) throw new Error('Upload failed');
+  return (await res.json()).secure_url;
+}
+
+// ── UPLOAD PROJECT ───────────────────────────────────────────
+window.doUpload = async function(){
+  if(!CU){showToast('⚠️ Please sign in first');return;}
+  const title=v('up_title'),cat=v('up_category'),desc=v('up_desc'),fi=document.getElementById('up_file');
+  if(!title||!cat){showToast('⚠️ Fill title and category');return;}
+  const maxProjects=CUD?.isPro?999:3;
+  const mySnap=await getDocs(query(collection(db,"projects"),where("authorId","==",CU.uid)));
+  if(mySnap.size>=maxProjects&&!CUD?.isPro){showToast('⚠️ Free plan: max 3 projects. Upgrade to Pro!');openModal('upgrade');return;}
+  try{
+    showToast('Publishing...');
+    let coverURL='';
+    if(fi.files.length>0){
+      const file=fi.files[0];
+      const maxMB=CUD?.isPro?250:50;
+      if(file.size>maxMB*1024*1024){showToast(`⚠️ Max ${maxMB}MB`);return;}
+      setUploadZoneLoading(true);
+      coverURL=await uploadToCloudinary(file);
+      setUploadZoneLoading(false);
+    }
+    const authorName=`${CUD?.firstName||''} ${CUD?.lastName||''}`.trim();
+    await addDoc(collection(db,"projects"),{
+      title,category:cat,description:desc,coverURL,
+      authorId:CU.uid,authorName,authorColor:CUD?.avatarColor||'#FF5C00',
+      authorAvatarURL:CUD?.avatarURL||'',
+      authorVerified:CUD?.verified||false,
+      authorIsPro:CUD?.isPro||false,
+      views:0,likes:0,createdAt:serverTimestamp()
+    });
+    await updateDoc(doc(db,"users",CU.uid),{projectCount:increment(1)});
+    closeModal('upload');
+    resetUploadZone();
+    showToast('✅ Project published!');
+    loadDashboard();
+    loadPublicProjects();
+  }catch(e){setUploadZoneLoading(false);showToast('❌ '+e.message);}
+};
+
+function setUploadZoneLoading(on){
+  const z=document.getElementById('uploadZone');
+  if(on) z.innerHTML='<div style="font-size:32px">☁️</div><p style="margin-top:8px;font-weight:500;color:var(--text-muted)">Uploading to cloud...</p>';
+}
+function resetUploadZone(){
+  document.getElementById('uploadZone').innerHTML=`<div style="font-size:36px;margin-bottom:8px">📁</div><div style="font-size:14px;font-weight:500;color:var(--text)">Drop files here or click to upload</div><div style="font-size:12px;color:var(--text-muted);margin-top:4px">Images or Video · Max 50MB free / 250MB Pro</div>`;
+  document.getElementById('up_title').value='';
+  document.getElementById('up_desc').value='';
+  document.getElementById('up_file').value='';
+}
+
+// ── LOAD PUBLIC PROJECTS ────────────────────────────────────
+window.loadPublicProjects = async function(category='all'){
+  const grid=document.getElementById('projectGrid');
+  grid.innerHTML=skeletonCards(6);
+  try{
+    let q = category==='all'
+      ? query(collection(db,"projects"),orderBy("createdAt","desc"))
+      : query(collection(db,"projects"),where("category","==",category),orderBy("createdAt","desc"));
+    const snap=await getDocs(q);
+    if(snap.empty){grid.innerHTML=emptyState('🎨','No projects yet','Be the first to upload your work!','Upload Project','openModal(\'upload\')');return;}
+
+    // Fetch unique author user docs for live verified/pro status
+    const projects = snap.docs.map(d=>({id:d.id,...d.data()}));
+    const uniqueAuthorIds = [...new Set(projects.map(p=>p.authorId).filter(Boolean))];
+    const userMap = {};
+    await Promise.all(uniqueAuthorIds.map(async uid=>{
+      try{
+        const uSnap = await getDoc(doc(db,"users",uid));
+        if(uSnap.exists()) userMap[uid] = uSnap.data();
+      }catch(e){}
+    }));
+    // Merge live user status into project data
+    projects.forEach(p=>{
+      if(p.authorId && userMap[p.authorId]){
+        p.authorVerified = userMap[p.authorId].verified || false;
+        p.authorIsPro    = userMap[p.authorId].isPro    || false;
+      }
+    });
+
+    const bgs=['linear-gradient(135deg,#f093fb,#f5576c)','linear-gradient(135deg,#4facfe,#00f2fe)','linear-gradient(135deg,#43e97b,#38f9d7)','linear-gradient(135deg,#fa709a,#fee140)','linear-gradient(135deg,#a18cd1,#fbc2eb)','linear-gradient(135deg,#667eea,#764ba2)','linear-gradient(135deg,#f7971e,#ffd200)'];
+    grid.innerHTML=projects.map((p,i)=>projectCard(p,bgs[i%bgs.length])).join('');
+  }catch(e){grid.innerHTML=emptyState('⚠️','Could not load projects','Check your connection and try again.');}
+};
+
+function projectCard(p,bg,isOwn){
+  const color=p.authorColor||'#6B4EFF';
+  const ini=(p.authorName||'?')[0];
+  const avatarStyle=p.authorAvatarURL
+    ?`background-image:url(${p.authorAvatarURL});background-size:cover;background-position:center;background-color:transparent`
+    :`background:${color}`;
+  const avatarContent=p.authorAvatarURL?'':ini;
+  const verifiedBadge = p.authorVerified
+    ? `<span title="Verified" style="background:#3b82f6;border-radius:50%;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0"><svg viewBox="0 0 24 24" width="8" height="8"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="white"/></svg></span>` : '';
+  const proBadge = p.authorIsPro
+    ? `<span style="background:var(--orange);color:white;border-radius:3px;padding:1px 5px;font-size:8px;font-weight:700;line-height:1.4">PRO</span>` : '';
+  return `<div class="portfolio-card" onclick="viewFirebaseProfile('${p.authorId||''}','${p.id}')">
+    <div class="portfolio-thumb" style="background:${bg}">
+      ${p.coverURL?`<img src="${p.coverURL}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`:'<span style="font-size:44px">🎨</span>'}
+      <div class="portfolio-thumb-overlay"></div>
+    </div>
+    <div class="portfolio-info">
+      <div class="portfolio-info-top">
+        <div class="portfolio-title">${p.title}</div>
+        <span class="badge badge-gray" style="font-size:10px">${p.category||'Design'}</span>
+      </div>
+      <div class="portfolio-creator">
+        <div class="avatar" style="${avatarStyle};width:26px;height:26px;font-size:10px">${avatarContent}</div>
+        <div class="creator-name" style="display:flex;align-items:center;gap:4px">${p.authorName||'Creative'} ${verifiedBadge} ${proBadge}</div>
+      </div>
+      <div class="portfolio-stats">
+        <div class="pstat"><strong>${p.views||0}</strong> views</div>
+        <div class="pstat"><strong id="lk_${p.id}">${p.likes||0}</strong> likes <button onclick="event.stopPropagation();likeProject('${p.id}')" style="border:none;background:none;cursor:pointer;font-size:13px;padding:0">❤️</button></div>
+        ${isOwn?`<button onclick="event.stopPropagation();deleteProject('${p.id}')" style="margin-left:auto;border:none;background:rgba(239,68,68,0.15);color:#f87171;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px">Delete</button>`:''}
+      </div>
+    </div>
+  </div>`;
+}
+
+// ── LIKE ────────────────────────────────────────────────────
+window.likeProject = async function(id){
+  try{
+    await updateDoc(doc(db,"projects",id),{likes:increment(1)});
+    const el=document.getElementById('lk_'+id);
+    if(el) el.textContent=parseInt(el.textContent)+1;
+    showToast('❤️ Liked!');
+  }catch(e){}
+};
+
+// ── DELETE PROJECT ──────────────────────────────────────────
+window.deleteProject = async function(id){
+  if(!confirm('Delete this project? This cannot be undone.')) return;
+  try{
+    await deleteDoc(doc(db,"projects",id));
+    if(CU) await updateDoc(doc(db,"users",CU.uid),{projectCount:increment(-1)});
+    showToast('Project deleted.');
+    loadDashboard();
+    loadPublicProjects();
+  }catch(e){showToast('❌ '+e.message);}
+};
+
+// ── LOAD CREATIVES ──────────────────────────────────────────
+window.loadPublicCreatives = async function(type='all'){
+  const grid=document.getElementById('creativesGrid');
+  grid.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text-muted)">Loading creatives...</div>';
+  try{
+    let snap=await getDocs(query(collection(db,"users"),orderBy("createdAt","desc")));
+    let users=snap.docs.map(d=>({id:d.id,...d.data()}));
+    if(type!=='all'){
+      const map={graphic:['graphic','brand','social','illustration'],video:['video','cinematographer','reels'],motion:['motion','3d']};
+      users=users.filter(u=>map[type]?.some(k=>u.role?.toLowerCase().includes(k)));
+    }
+    if(users.length===0){grid.innerHTML=emptyState('👥','No creatives yet','Be the first to join!');return;}
+    grid.innerHTML=users.map(c=>{
+      const ini=(c.firstName?.[0]||'')+(c.lastName?.[0]||'');
+      return `<div class="profile-card" onclick="viewFirebaseProfile('${c.id}')">
+        ${c.verified?'<div class="verified-badge"><svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="white"/></svg></div>':''}
+        ${c.isPro?'<div style="position:absolute;top:12px;left:12px;background:var(--orange);color:white;font-size:10px;font-weight:700;padding:2px 8px;border-radius:100px">PRO</div>':''}
+        <div class="profile-avatar-big" style="background:${c.avatarURL?'transparent':c.avatarColor||'#6B4EFF'}">${c.avatarURL?`<img src="${c.avatarURL}" style="width:100%;height:100%;object-fit:cover">`:ini||'?'}</div>
+        <div class="profile-name">${c.firstName||''} ${c.lastName||''}</div>
+        <div class="profile-role">${c.role||''}</div>
+        <div class="profile-location">📍 ${c.location||'Sri Lanka'}</div>
+        <div class="profile-tags">${(c.tags||[]).slice(0,3).map(t=>`<span class="badge badge-gray">${t}</span>`).join('')}</div>
+        <div class="profile-stats-row">
+          <div class="pst"><div class="pst-num">${c.projectCount||0}</div><div class="pst-label">Projects</div></div>
+          <div class="pst"><div class="pst-num">${c.totalLikes||0}</div><div class="pst-label">Likes</div></div>
+          <div class="pst"><div class="pst-num">${c.profileViews||0}</div><div class="pst-label">Views</div></div>
+        </div>
+      </div>`;
+    }).join('');
+  }catch(e){grid.innerHTML='<div style="text-align:center;padding:40px;color:var(--text-muted)">Could not load creatives.</div>';}
+};
+
+// ── VIEW PROFILE ────────────────────────────────────────────
+window.openMyPortfolio = function(){
+  if(!CU) return openModal('auth');
+  viewFirebaseProfile(CU.uid, null, true);
+};
+
+window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
+  if(!userId) return;
+  showPage('profile');
+  document.getElementById('pvAvatar').innerHTML='⏳';
+  document.getElementById('pvName').textContent='Loading…';
+  document.getElementById('pvRole').textContent='';
+  document.getElementById('pvBio').textContent='';
+  document.getElementById('pvTags').innerHTML='';
+  document.getElementById('pvSkills').innerHTML='';
+  document.getElementById('pvSocial').innerHTML='';
+  document.getElementById('pvProjects').innerHTML='';
+  try{
+    const snap=await getDoc(doc(db,"users",userId));
+    if(!snap.exists()){document.getElementById('pvName').textContent='User not found';return;}
+    const u=snap.data(); const uid=snap.id;
+    const selfView=selfOverride||(CU&&CU.uid===uid);
+    if(!selfView) updateDoc(doc(db,"users",uid),{profileViews:increment(1)}).catch(()=>{});
+
+    // Banner
+    const banner=document.getElementById('pvHeroBanner');
+    if(u.bannerURL){
+      banner.style.backgroundImage=`url(${u.bannerURL})`;
+      banner.style.backgroundSize='cover';
+      banner.style.backgroundPosition='center';
+    } else {
+      const bcs=['linear-gradient(135deg,#1a1a2e,#0f3460)','linear-gradient(135deg,#2d1b69,#11998e)','linear-gradient(135deg,#1e3c72,#2a5298)','linear-gradient(135deg,#4a1942,#c94b4b)'];
+      banner.style.backgroundImage=bcs[uid.charCodeAt(0)%bcs.length];
+      banner.style.backgroundSize='';
+    }
+    document.getElementById('pvHeroBannerEditBtn').style.display=selfView?'block':'none';
+
+    // Avatar
+    const pvAv=document.getElementById('pvAvatar');
+    const ini=(u.firstName?.[0]||'')+(u.lastName?.[0]||'');
+    if(u.avatarURL){
+      pvAv.innerHTML=`<img src="${u.avatarURL}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
+      pvAv.style.background='transparent';
+    } else { pvAv.innerHTML=ini||'?'; pvAv.style.background=u.avatarColor||'#6B4EFF'; }
+    document.getElementById('pvAvatarEditBtn').style.display=selfView?'flex':'none';
+
+    // Info
+    document.getElementById('pvName').textContent=`${u.firstName||''} ${u.lastName||''}`.trim();
+    document.getElementById('pvProBadge').style.display=u.isPro?'inline-flex':'none';
+    document.getElementById('pvVerifiedBadge').style.display=u.verified?'inline-flex':'none';
+    document.getElementById('pvRole').textContent=u.role||'Creative';
+    document.getElementById('pvUsername').textContent=u.username?`@${u.username}`:'';
+    document.getElementById('pvBio').textContent=u.bio||'';
+    document.getElementById('pvLocationText').textContent=u.location||'Sri Lanka';
+    document.getElementById('pvLocationPill').style.display=u.location?'inline-flex':'none';
+    document.getElementById('pvTags').innerHTML=(u.tags||[]).map(t=>`<span class="badge badge-gray">${t}</span>`).join('');
+    document.getElementById('pvSkills').innerHTML=(u.skills||[]).map(s=>`<span class="badge badge-purple">${s}</span>`).join('');
+
+    // Social
+    const sl=u.socialLinks||{};
+    const socEl=document.getElementById('pvSocial');
+    socEl.innerHTML='';
+    if(sl.instagram) socEl.innerHTML+=`<a href="${sl.instagram}" target="_blank" class="btn btn-ghost btn-sm">📸 Instagram</a>`;
+    if(sl.whatsapp) socEl.innerHTML+=`<a href="https://wa.me/${sl.whatsapp}" target="_blank" class="btn btn-ghost btn-sm">💬 WhatsApp</a>`;
+    if(sl.youtube) socEl.innerHTML+=`<a href="${sl.youtube}" target="_blank" class="btn btn-ghost btn-sm">▶️ YouTube</a>`;
+    if(sl.behance) socEl.innerHTML+=`<a href="${sl.behance}" target="_blank" class="btn btn-ghost btn-sm">🅱️ Behance</a>`;
+    if(sl.tiktok) socEl.innerHTML+=`<a href="${sl.tiktok}" target="_blank" class="btn btn-ghost btn-sm">🎵 TikTok</a>`;
+    if(sl.website) socEl.innerHTML+=`<a href="${sl.website}" target="_blank" class="btn btn-ghost btn-sm">🌐 Website</a>`;
+
+    // Action buttons
+    const actEl=document.getElementById('pvActionBtns');
+    if(selfView){
+      actEl.innerHTML=`
+        <button class="btn btn-ghost btn-sm" onclick="openEditProfile()">✏️ Edit Profile</button>
+        <button class="btn btn-ghost btn-sm" onclick="copyPortfolioLink('${uid}')">🔗 Share</button>
+        <button class="btn btn-primary btn-sm" onclick="openModal('upload')">+ Upload</button>`;
+      document.getElementById('pvUploadBtn').style.display='block';
+    } else {
+      actEl.innerHTML=`
+        <button class="btn btn-ghost btn-sm" onclick="copyPortfolioLink('${uid}')">🔗 Share</button>
+        <button class="btn btn-primary" onclick="document.getElementById('hire_creativeId').value='${uid}';document.getElementById('hire_creativeName').value='${((u.firstName||'')+' '+(u.lastName||'')).trim()}';openModal('hire')">💼 Hire Me</button>`;
+      document.getElementById('pvUploadBtn').style.display='none';
+    }
+
+    // Projects + stats
+    const pSnap=await getDocs(query(collection(db,"projects"),where("authorId","==",uid)));
+    const pDocs=pSnap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+    const bgs=['linear-gradient(135deg,#f093fb,#f5576c)','linear-gradient(135deg,#4facfe,#00f2fe)','linear-gradient(135deg,#43e97b,#38f9d7)','linear-gradient(135deg,#fa709a,#fee140)','linear-gradient(135deg,#a18cd1,#fbc2eb)','linear-gradient(135deg,#667eea,#764ba2)'];
+    let tl=0,tv=0; pDocs.forEach(p=>{tl+=p.likes||0;tv+=p.views||0;});
+    document.getElementById('pvStatProjects').textContent=pDocs.length;
+    document.getElementById('pvStatLikes').textContent=tl;
+    document.getElementById('pvStatViews').textContent=tv.toLocaleString();
+    const pg=document.getElementById('pvProjects');
+    if(pDocs.length===0){
+      pg.innerHTML=`<div style="text-align:center;padding:40px 20px;color:var(--text-muted)">
+        <div style="font-size:36px;margin-bottom:12px">🎨</div>
+        <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:6px">No published projects yet.</div>
+        ${selfView?`<button class="btn btn-primary" onclick="openModal('upload')" style="margin-top:12px">Upload a project →</button>`:''}
+      </div>`;
+    } else {
+      pg.innerHTML=`<div class="portfolio-grid">${pDocs.map((p,i)=>projectCard(p,bgs[i%bgs.length],selfView)).join('')}</div>`;
+    }
+  }catch(e){console.error(e);document.getElementById('pvName').textContent='Error loading profile';}
+};
+
+window.copyPortfolioLink = function(uid){
+  const url=`${location.origin}${location.pathname}#portfolio/${uid}`;
+  navigator.clipboard.writeText(url).then(()=>showToast('🔗 Portfolio link copied!')).catch(()=>showToast('Copy failed'));
+};
+
+window.triggerBannerUpload = function(){ document.getElementById('bannerFileInput').click(); };
+window.handleBannerUpload = async function(input){
+  const file=input.files[0]; if(!file) return;
+  if(file.size>8*1024*1024){showToast('⚠️ Max 8MB for cover');return;}
+  showToast('⏳ Uploading cover…');
+  try{
+    const url=await uploadToCloudinary(file);
+    await updateDoc(doc(db,"users",CU.uid),{bannerURL:url});
+    CUD.bannerURL=url;
+    const banner=document.getElementById('pvHeroBanner');
+    banner.style.backgroundImage=`url(${url})`;
+    banner.style.backgroundSize='cover';
+    showToast('✅ Cover updated!');
+  }catch(e){showToast('❌ Upload failed');}
+};
+
+// ── DASHBOARD ───────────────────────────────────────────────
+window.loadDashboard = async function(){
+  if(!CU) return;
+  const ini=(CUD?.firstName?.[0]||'')+(CUD?.lastName?.[0]||'');
+  const dashAv=document.getElementById('dashAvatarInitials');
+  if(CUD?.avatarURL){
+    dashAv.innerHTML=`<img src="${CUD.avatarURL}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
+    dashAv.style.background='transparent';
+  } else {
+    dashAv.innerHTML=ini||'?';
+    dashAv.style.background=CUD?.avatarColor||'#FF5C00';
+  }
+  document.getElementById('dashUserName').textContent=CUD?.firstName||'Creative';
+  document.getElementById('dashPlanLabel').textContent=CUD?.isPro?'⭐ Pro Plan':'Free Plan';
+  try{
+    const pSnap=await getDocs(query(collection(db,"projects"),where("authorId","==",CU.uid)));
+    const myP=pSnap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+    let tv=0,tl=0; myP.forEach(p=>{tv+=p.views||0;tl+=p.likes||0;});
+    document.getElementById('dashStatViews').textContent=tv.toLocaleString();
+    document.getElementById('dashStatLikes').textContent=tl;
+    document.getElementById('dashStatProjects').textContent=myP.length;
+    document.getElementById('dashStatProfileViews').textContent=(CUD?.profileViews||0).toLocaleString();
+    document.getElementById('dashPlanNote').textContent=CUD?.isPro?'Pro — Unlimited':`${myP.length}/3 Free`;
+    // Overview insight
+    const insightEl=document.getElementById('dashOverviewInsight');
+    if(myP.length>0){
+      const topP=myP.reduce((a,b)=>(b.views||0)>(a.views||0)?b:a,myP[0]);
+      insightEl.style.display='block';
+      insightEl.innerHTML=`👋 Hey <strong style="color:var(--text)">${CUD?.firstName||'Creative'}</strong> — you have <strong style="color:var(--text)">${myP.length}</strong> live project${myP.length!==1?'s':''} with <strong style="color:var(--text)">${tv.toLocaleString()}</strong> total views and <strong style="color:var(--text)">${tl}</strong> likes. Your top project is <strong style="color:var(--orange)">"${topP.title}"</strong> with ${topP.views||0} views.`;
+    } else { insightEl.style.display='none'; }
+    document.getElementById('dashOverviewPlan').textContent=CUD?.isPro?'⭐ Pro':'Free Plan';
+    const bgs=['linear-gradient(135deg,#f093fb,#f5576c)','linear-gradient(135deg,#4facfe,#00f2fe)','linear-gradient(135deg,#43e97b,#38f9d7)','linear-gradient(135deg,#fa709a,#fee140)','linear-gradient(135deg,#667eea,#764ba2)'];
+    // Overview recent projects list
+    const dl=document.getElementById('dashProjects');
+    if(myP.length===0){dl.innerHTML=emptyState('📂','No projects yet','Upload your first project — it\'ll appear in Discover for clients to find you.','Upload Project',"openModal('upload')");
+    } else {
+      dl.innerHTML=myP.slice(0,5).map((p,i)=>projectRowHtml(p,bgs[i%bgs.length])).join('');
+    }
+    // Full projects tab with preview cards
+    const dFull=document.getElementById('dashProjectsFull');
+    if(myP.length===0){dFull.innerHTML=emptyState('📂','No projects yet','Upload your first project.','Upload Project',"openModal('upload')");}
+    else{
+      dFull.innerHTML=`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;padding-bottom:8px">${myP.map((p,i)=>projectPreviewCard(p,bgs[i%bgs.length])).join('')}</div>`;
+    }
+    loadDashInquiries();
+  }catch(e){console.error(e);}
+};
+
+function projectRowHtml(p,bg){
+  return `<div class="project-row">
+    <div style="background:${bg};width:48px;height:48px;border-radius:8px;overflow:hidden;flex-shrink:0;display:flex;align-items:center;justify-content:center">
+      ${p.coverURL?`<img src="${p.coverURL}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`:'<span style="font-size:20px">🎨</span>'}
+    </div>
+    <div class="project-row-info">
+      <div class="project-row-name">${p.title}</div>
+      <div class="project-row-meta">${p.category} · ${p.views||0} views · ${p.likes||0} likes</div>
+    </div>
+    <span class="badge badge-green" style="margin-right:8px">Live</span>
+    <button onclick="deleteProject('${p.id}')" style="border:none;background:rgba(239,68,68,0.15);color:#f87171;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:12px;font-weight:500">Delete</button>
+  </div>`;
+}
+
+function projectPreviewCard(p,bg){
+  const isVideo=p.coverURL&&(p.coverURL.includes('/video/')||p.coverURL.match(/\.(mp4|mov|webm)/i));
+  let thumbHTML='';
+  if(p.coverURL){
+    if(isVideo){
+      thumbHTML=`<video src="${p.coverURL}" style="width:100%;height:100%;object-fit:cover" muted playsinline preload="metadata" onmouseover="this.play()" onmouseout="this.pause();this.currentTime=0"></video><div style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,.6);border-radius:100px;padding:2px 8px;font-size:10px;color:white">▶ Video</div>`;
+    } else {
+      thumbHTML=`<img src="${p.coverURL}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`;
+    }
+  } else {
+    thumbHTML=`<span style="font-size:36px">🎨</span>`;
+  }
+  return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:all .2s" onmouseover="this.style.borderColor='var(--border2)'" onmouseout="this.style.borderColor='var(--border)'">
+    <div style="width:100%;height:140px;background:${bg};position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden">${thumbHTML}</div>
+    <div style="padding:12px">
+      <div style="font-family:var(--font-display);font-size:13px;font-weight:700;color:var(--text);margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.title}</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px">${p.category} · ${p.views||0} views · ❤️ ${p.likes||0}</div>
+      <div style="display:flex;gap:6px">
+        <span class="badge badge-green" style="font-size:10px">Live</span>
+        <button onclick="deleteProject('${p.id}')" style="border:none;background:rgba(239,68,68,0.12);color:#f87171;border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;font-weight:500;margin-left:auto">🗑 Delete</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// ── DASHBOARD INQUIRIES ─────────────────────────────────────
+async function loadDashInquiries(){
+  if(!CU) return;
+  try{
+    const q=query(collection(db,"inquiries"),where("creativeId","==",CU.uid));
+    const snap=await getDocs(q);
+    const sorted=snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+    const el=document.getElementById('dashInquiries');
+    if(sorted.length===0){el.innerHTML='<div style="text-align:center;padding:24px;color:var(--text-muted);font-size:14px">No briefs received yet. Share your profile to get hired!</div>';return;}
+    el.innerHTML=sorted.map(inq=>{
+      return `<div class="project-row" style="${inq.read?'':'background:var(--surface3);border-radius:8px;padding:12px;'}">
+        <div style="width:40px;height:40px;border-radius:50%;background:var(--orange-pale);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">📩</div>
+        <div class="project-row-info">
+          <div class="project-row-name">${inq.projectTitle} <span style="font-size:11px;color:var(--text-muted)">from ${inq.name}</span></div>
+          <div class="project-row-meta">${inq.projectType} · Budget: ${inq.budget} · WA: ${inq.whatsapp}</div>
+          ${inq.notes?`<div style="font-size:12px;color:var(--text-muted);margin-top:4px">${inq.notes}</div>`:''}
+        </div>
+        <div style="display:flex;gap:6px;flex-shrink:0;align-items:center">
+          ${!inq.read?`<button onclick="markInquiryRead('${inq.id}')" style="border:none;background:var(--surface2);color:var(--text-muted);border-radius:6px;padding:5px 10px;cursor:pointer;font-size:11px">Mark read</button>`:''}
+          <a href="https://wa.me/${inq.whatsapp}" target="_blank" style="border:none;background:#25D366;color:white;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:11px;text-decoration:none;display:flex;align-items:center">WhatsApp</a>
+          <button onclick="deleteInquiry('${inq.id}')" style="border:none;background:rgba(239,68,68,0.12);color:#f87171;border-radius:6px;padding:5px 8px;cursor:pointer;font-size:13px" title="Delete brief">🗑</button>
+        </div>
+      </div>`;
+    }).join('');
+  }catch(e){console.error(e);}
+}
+
+window.markInquiryRead = async function(id){
+  await updateDoc(doc(db,"inquiries",id),{read:true});
+  loadDashInquiries();
+};
+
+window.deleteInquiry = async function(id){
+  if(!confirm('Delete this brief? This cannot be undone.')) return;
+  try{
+    await deleteDoc(doc(db,"inquiries",id));
+    showToast('🗑 Brief deleted');
+    loadDashInquiries();
+    // refresh notif panel if open
+    const panel=document.getElementById('notifPanel');
+    if(panel&&panel.style.display==='block'){
+      panel.style.display='none';
+      toggleNotifPanel();
+    }
+  }catch(e){showToast('❌ '+e.message);}
+};
+
+// ── HIRE BRIEF ──────────────────────────────────────────────
+window.doHire = async function(){
+  const cid=v('hire_creativeId'),cname=v('hire_creativeName');
+  const projectTitle=v('hire_title'),projectType=v('hire_type'),budget=v('hire_budget');
+  const name=v('hire_name'),wa=v('hire_wa'),notes=v('hire_notes');
+  if(!projectTitle||!name||!wa){showToast('⚠️ Fill required fields');return;}
+  try{
+    await addDoc(collection(db,"inquiries"),{
+      creativeId:cid,creativeName:cname,
+      projectTitle,projectType,budget,name,whatsapp:wa,notes,
+      read:false,createdAt:serverTimestamp()
+    });
+    closeModal('hire');
+    showToast('✅ Brief sent! The creative will reach out.');
+  }catch(e){showToast('❌ '+e.message);}
+};
+
+// ── APPLY JOB ───────────────────────────────────────────────
+window.doApplyJob = async function(){
+  const name    = (document.getElementById('ja_name')?.value||'').trim();
+  const wa      = (document.getElementById('ja_wa')?.value||'').trim();
+  const role    = (document.getElementById('ja_role')?.value||'').trim();
+  const exp     = (document.getElementById('ja_exp')?.value||'').trim();
+  const portfolio=(document.getElementById('ja_portfolio')?.value||'').trim();
+  const note    = (document.getElementById('ja_note')?.value||'').trim();
+  const salaryEx= (document.getElementById('ja_salary')?.value||'').trim();
+  const jobTitle = document.getElementById('ja_jobTitle').value;
+  const company  = document.getElementById('ja_company').value;
+  const posterId = document.getElementById('ja_posterId').value;
+  const posterName=document.getElementById('ja_posterName').value;
+
+  if(!name)   { showToast('⚠️ Please enter your name'); return; }
+  if(!wa)     { showToast('⚠️ Please enter your WhatsApp number'); return; }
+  if(!note)   { showToast('⚠️ Please add a cover note'); return; }
+  if(!posterId){ showToast('⚠️ Cannot identify employer — only real posted jobs can receive briefs'); return; }
+
+  // Build a rich notes summary
+  const richNotes = [
+    role     ? `🎨 Specialty: ${role}`        : '',
+    exp      ? `📅 Experience: ${exp}`         : '',
+    salaryEx ? `💰 Salary expectation: LKR ${salaryEx}` : '',
+    portfolio? `🔗 Portfolio: ${portfolio}`    : '',
+    note     ? `\n📝 ${note}`                  : '',
+  ].filter(Boolean).join('\n');
+
+  const btn = document.querySelector('#modal-jobdetail .btn-primary');
+  if(btn){ btn.disabled=true; btn.textContent='Sending…'; }
+
+  try{
+    await addDoc(collection(db,"inquiries"),{
+      creativeId:   posterId,        // employer receives it
+      creativeName: posterName,
+      projectTitle: `📋 Job Application: ${jobTitle}`,
+      projectType:  role || 'Creative Role',
+      budget:       salaryEx ? `LKR ${salaryEx}` : 'Open to discuss',
+      name,
+      whatsapp: wa,
+      notes: richNotes,
+      jobApplication: true,
+      company,
+      applicantId: CU ? CU.uid : null,
+      read: false,
+      createdAt: serverTimestamp()
+    });
+    closeModal('jobdetail');
+    showToast('✅ Brief sent! The employer will see it in their dashboard.');
+  } catch(e) {
+    showToast('❌ '+e.message);
+  } finally {
+    if(btn){ btn.disabled=false; btn.innerHTML='🚀 Send Brief'; }
+  }
+};
+
+// ── EDIT PROFILE ─────────────────────────────────────────────
+window.openEditProfile = function(){
+  if(!CU){openModal('auth');return;}
+  document.getElementById('ep_firstName').value=CUD?.firstName||'';
+  document.getElementById('ep_lastName').value=CUD?.lastName||'';
+  document.getElementById('ep_role').value=CUD?.role||'';
+  document.getElementById('ep_location').value=CUD?.location||'';
+  document.getElementById('ep_bio').value=CUD?.bio||'';
+  document.getElementById('ep_tags').value=(CUD?.tags||[]).join(', ');
+  document.getElementById('ep_skills').value=(CUD?.skills||[]).join(', ');
+  const sl=CUD?.socialLinks||{};
+  document.getElementById('ep_instagram').value=sl.instagram||'';
+  document.getElementById('ep_whatsapp').value=sl.whatsapp||'';
+  document.getElementById('ep_youtube').value=sl.youtube||'';
+  document.getElementById('ep_behance').value=sl.behance||'';
+  document.getElementById('ep_tiktok').value=sl.tiktok||'';
+  document.getElementById('ep_website').value=sl.website||'';
+  // Reset pic upload state
+  window._newAvatarURL = null;
+  const picPreview = document.getElementById('epAvatarPreview');
+  if(picPreview){
+    if(CUD?.avatarURL){
+      picPreview.innerHTML=`<img src="${CUD.avatarURL}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
+    } else {
+      const ini=((CUD?.firstName?.[0]||'')+(CUD?.lastName?.[0]||'')).toUpperCase()||'?';
+      picPreview.textContent=ini;
+      picPreview.style.background=CUD?.avatarColor||'#FF5C00';
+    }
+  }
+  openModal('editprofile');
+  updateProfilePreview();
+};
+
+window.updateProfilePreview = function(){
+  const fn=v('ep_firstName')||'First';
+  const ln=v('ep_lastName')||'Last';
+  const role=v('ep_role')||'Your Role';
+  const loc=v('ep_location')||'Location';
+  const bio=v('ep_bio')||'Your bio will appear here...';
+  const tags=(v('ep_tags')||'').split(',').map(t=>t.trim()).filter(Boolean);
+  const skills=(v('ep_skills')||'').split(',').map(s=>s.trim()).filter(Boolean);
+  const ini=((fn[0]||'')+(ln[0]||'')).toUpperCase();
+  const pa=document.getElementById('prevAvatar');
+  const avatarURL = window._newAvatarURL || CUD?.avatarURL;
+  if(avatarURL){
+    pa.textContent='';
+    pa.style.background='transparent';
+    pa.style.backgroundImage=`url(${avatarURL})`;
+    pa.style.backgroundSize='cover';
+    pa.style.backgroundPosition='center';
+  } else {
+    pa.textContent=ini||'?';
+    pa.style.backgroundImage='';
+    pa.style.background=CUD?.avatarColor||'#FF5C00';
+  }
+  document.getElementById('prevName').textContent=`${fn} ${ln}`;
+  document.getElementById('prevRole').textContent=`${role} · ${loc}`;
+  document.getElementById('prevBio').textContent=bio;
+  document.getElementById('prevTags').innerHTML=tags.map(t=>`<span class="badge badge-gray">${t}</span>`).join('');
+  document.getElementById('prevSkills').innerHTML=skills.map(s=>`<span class="badge badge-purple">${s}</span>`).join('');
+  const isPro=CUD?.isPro;
+  const sl_instagram=v('ep_instagram');
+  document.getElementById('prevSocialLinks').innerHTML=isPro&&sl_instagram?`<span class="badge badge-orange">📸 Instagram</span>`:(isPro?'':`<span style="font-size:11px;color:var(--orange)">🔒 Social links — Pro only</span>`);
+};
+
+window.triggerAvatarUpload = function(){
+  document.getElementById('ep_avatar_file').click();
+};
+
+window.handleAvatarChange = async function(input){
+  const file = input.files[0];
+  if(!file) return;
+  if(file.size > 5*1024*1024){showToast('⚠️ Max 5MB for profile pic');return;}
+  const picPreview = document.getElementById('epAvatarPreview');
+  picPreview.innerHTML='<div style="font-size:20px;animation:spin 1s linear infinite">⏳</div>';
+  try{
+    const url = await uploadToCloudinary(file);
+    window._newAvatarURL = url;
+    picPreview.innerHTML=`<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
+    updateProfilePreview();
+    showToast('✅ Photo ready — save profile to apply');
+  }catch(e){
+    showToast('❌ Upload failed');
+    picPreview.textContent=((CUD?.firstName?.[0]||'')+(CUD?.lastName?.[0]||'')).toUpperCase()||'?';
+  }
+};
+
+window.doSaveProfile = async function(){
+  if(!CU) return;
+  const fn=v('ep_firstName'),ln=v('ep_lastName'),role=v('ep_role'),loc=v('ep_location');
+  if(!fn||!role){showToast('⚠️ Name and role required');return;}
+  const tags=(v('ep_tags')||'').split(',').map(t=>t.trim()).filter(Boolean);
+  const skills=(v('ep_skills')||'').split(',').map(s=>s.trim()).filter(Boolean);
+  const isPro=CUD?.isPro||false;
+  const socialLinks=isPro?{
+    instagram:v('ep_instagram'),whatsapp:v('ep_whatsapp'),
+    youtube:v('ep_youtube'),behance:v('ep_behance'),
+    tiktok:v('ep_tiktok'),website:v('ep_website')
+  }:CUD?.socialLinks||{};
+  const updateData={firstName:fn,lastName:ln,role,location:loc,bio:v('ep_bio'),tags,skills,socialLinks};
+  if(window._newAvatarURL) updateData.avatarURL = window._newAvatarURL;
+  try{
+    await updateDoc(doc(db,"users",CU.uid),updateData);
+    // If avatar changed, update all existing projects with new avatarURL
+    if(window._newAvatarURL){
+      const pSnap=await getDocs(query(collection(db,"projects"),where("authorId","==",CU.uid)));
+      await Promise.all(pSnap.docs.map(d=>updateDoc(d.ref,{authorAvatarURL:window._newAvatarURL})));
+    }
+    const snap=await getDoc(doc(db,"users",CU.uid));
+    CUD=snap.data();
+    updateNavLoggedIn();
+    closeModal('editprofile');
+    showToast('✅ Profile updated!');
+    loadDashboard();
+  }catch(e){showToast('❌ '+e.message);}
+};
+
+// ── JOBS ────────────────────────────────────────────────────
+window.loadJobs = async function(){
+  const el=document.getElementById('jobsList');
+  el.innerHTML='<div style="text-align:center;padding:20px;color:var(--text-muted);font-size:13px">Loading jobs…</div>';
+  try{
+    const snap=await getDocs(query(collection(db,"jobs"),orderBy("createdAt","desc")));
+    if(snap.empty){
+      el.innerHTML=`<div style="text-align:center;padding:48px 20px">
+        <div style="font-size:40px;margin-bottom:12px">📭</div>
+        <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:6px">No jobs available right now</div>
+        <div style="font-size:13px;color:var(--text-muted);margin-bottom:20px">Be the first to post a job opportunity for Sri Lanka's creatives.</div>
+        ${CU?`<button class="btn btn-primary" onclick="openModal('postjob')">+ Post a Job</button>`:`<button class="btn btn-ghost" onclick="openModal('auth')">Sign in to post</button>`}
+      </div>`;
+      return;
+    }
+    el.innerHTML=snap.docs.map(d=>jobCard({id:d.id,...d.data()})).join('');
+  }catch(e){
+    el.innerHTML='<div style="text-align:center;padding:32px;color:var(--text-muted);font-size:13px">⚠️ Could not load jobs. Please try again.</div>';
+  }
+};
+
+// ── JOB DATA STORE (avoids JSON-in-onclick issues) ──────────
+window._jobStore = {};
+
+function jobCard(j){
+  const isOwner=CU&&j.postedBy===CU.uid;
+  const storeKey = j.id || ('static_'+Math.random().toString(36).slice(2));
+  window._jobStore[storeKey] = j;
+  return `<div class="job-card" style="position:relative;cursor:pointer" onclick="openJobDetail('${storeKey}')">
+    <div class="job-icon">${j.icon||'🎨'}</div>
+    <div class="job-info">
+      <div class="job-title">${j.title}</div>
+      <div class="job-company">${j.company}</div>
+      <div class="job-tags">
+        <span class="badge badge-gray">${j.type||'Full-time'}</span>
+        <span class="badge badge-gray">📍 ${j.location||'Sri Lanka'}</span>
+        ${j.category?`<span class="badge badge-purple">${j.category}</span>`:''}
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0">
+      <div class="job-salary">${j.salary?'LKR '+j.salary:'Negotiable'}</div>
+      ${isOwner
+        ? `<button onclick="event.stopPropagation();deleteJob('${j.id}',event)" style="border:none;background:rgba(239,68,68,0.15);color:#f87171;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-weight:600">🗑 Delete</button>`
+        : `<span style="background:var(--orange);color:white;border-radius:6px;padding:4px 12px;font-size:11px;font-weight:700;letter-spacing:.3px">Apply →</span>`
+      }
+    </div>
+  </div>`;
+}
+
+window.openJobDetail = function(key){
+  const j = window._jobStore[key];
+  if(!j){ showToast('⚠️ Job data not found'); return; }
+  // Header info
+  document.getElementById('jd_icon').textContent = j.icon||'🎨';
+  document.getElementById('jd_title').textContent = j.title;
+  document.getElementById('jd_company').textContent = j.company;
+  document.getElementById('jd_salary').textContent = j.salary ? 'LKR '+j.salary+'/mo' : 'Negotiable';
+  document.getElementById('jd_type').textContent = j.type||'Full-time';
+  document.getElementById('jd_location').textContent = '📍 '+(j.location||'Sri Lanka');
+  document.getElementById('jd_category').textContent = j.category||'';
+  document.getElementById('jd_desc').textContent = j.description||j.desc||'No description provided.';
+  // Hidden fields
+  document.getElementById('ja_jobTitle').value = j.title;
+  document.getElementById('ja_company').value = j.company;
+  document.getElementById('ja_posterId').value = j.postedBy||'';
+  document.getElementById('ja_posterName').value = j.postedByName||j.company||'';
+  // Auto-fill if logged in
+  if(window.CUD){
+    const fullName = ((CUD.firstName||'')+' '+(CUD.lastName||'')).trim();
+    document.getElementById('ja_name').value = fullName;
+    document.getElementById('ja_wa').value = CUD.socialLinks?.whatsapp||'';
+    const roleEl = document.getElementById('ja_role');
+    const roleOpts = Array.from(roleEl.options).map(o=>o.value);
+    if(roleOpts.includes(CUD.role)) roleEl.value = CUD.role;
+  } else {
+    document.getElementById('ja_name').value='';
+    document.getElementById('ja_wa').value='';
+    document.getElementById('ja_role').value='';
+  }
+  document.getElementById('ja_note').value='';
+  document.getElementById('ja_salary').value='';
+  document.getElementById('ja_portfolio').value='';
+  // WA / Email contact buttons
+  const waBtn = document.getElementById('jd_waBtn');
+  const emailRow = document.getElementById('jd_emailRow');
+  const emailBtn = document.getElementById('jd_emailBtn');
+  if(j.whatsapp){
+    waBtn.href='https://wa.me/'+j.whatsapp.replace(/\D/g,'')+'?text=Hi!%20I%20saw%20your%20job%20post%20on%20Creativo%20for%20'+encodeURIComponent(j.title);
+    waBtn.style.display='flex';
+  } else { waBtn.style.display='none'; }
+  if(j.email){
+    emailBtn.href='mailto:'+j.email+'?subject=Application%20for%20'+encodeURIComponent(j.title);
+    emailRow.style.display='block';
+  } else { emailRow.style.display='none'; }
+  document.getElementById('modal-jobdetail').classList.add('open');
+};
+
+window.deleteJob = async function(jobId, e){
+  e && e.stopPropagation();
+  if(!confirm('Delete this job listing?')) return;
+  try{
+    await deleteDoc(doc(db,"jobs",jobId));
+    showToast('✅ Job deleted');
+    loadJobs();
+  }catch(err){showToast('❌ '+err.message);}
+};
+
+window.doPostJob = async function(){
+  const title=v('job_title'),company=v('job_company'),type=v('job_type'),loc=v('job_location'),sal=v('job_salary'),cat=v('job_category'),desc=v('job_desc'),wa=v('job_wa'),email=v('job_email');
+  if(!title||!company){showToast('⚠️ Fill required fields');return;}
+  if(!CU){showToast('⚠️ Sign in to post a job');return;}
+  try{
+    await addDoc(collection(db,"jobs"),{
+      title,company,type,location:loc,salary:sal,category:cat,icon:'🎨',
+      description:desc,whatsapp:wa,email,
+      postedBy:CU.uid,
+      postedByName:`${CUD?.firstName||''} ${CUD?.lastName||''}`.trim(),
+      createdAt:serverTimestamp()
+    });
+    closeModal('postjob');
+    showToast('✅ Job posted!');
+    loadJobs();
+  }catch(e){showToast('❌ '+e.message);}
+};
+
+// ── ADMIN FUNCTIONS ──────────────────────────────────────────
+let _allUsers = [];
+
+async function loadAdminPanel(){
+  if(!isAdmin()){ showToast('❌ Admin access naha'); return; }
+  const el = document.getElementById('adminUsersList');
+  el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--text-muted);font-size:13px">⏳ Users load වෙනවා...</div>';
+  try{
+    const snap = await getDocs(query(collection(db,'users'), orderBy('createdAt','desc')));
+    _allUsers = snap.docs.map(d=>({id:d.id,...d.data()}));
+    const searchBox = document.getElementById('adminSearchInput');
+    if(searchBox) searchBox.value = '';
+    // Show count
+    const countEl = document.getElementById('adminUserCount');
+    if(countEl) countEl.textContent = _allUsers.length + ' users';
+    renderAdminUsers(_allUsers);
+  }catch(e){
+    el.innerHTML = '<div style="padding:16px;color:#f87171;font-size:13px">⚠️ Error: '+e.message+'</div>';
+  }
+}
+
+function renderAdminUsers(users){
+  const el = document.getElementById('adminUsersList');
+  const countEl = document.getElementById('adminUserCount');
+  if(countEl) countEl.textContent = users.length + ' / ' + _allUsers.length + ' users';
+
+  if(!users || users.length===0){
+    el.innerHTML='<div style="text-align:center;padding:32px;color:var(--text-muted);font-size:13px">🔍 Results nemei</div>';
+    return;
+  }
+  el.innerHTML = users.map(u=>{
+    const name = `${u.firstName||''} ${u.lastName||''}`.trim() || 'No Name';
+    const ini  = ((u.firstName||'')[0]||'') + ((u.lastName||'')[0]||'');
+    const isVer = !!u.verified;
+    const isPro = !!u.isPro;
+    return `<div style="background:var(--surface2);border:1px solid ${isVer?'rgba(59,130,246,0.35)':isPro?'rgba(255,92,0,0.25)':'var(--border)'};border-radius:12px;padding:14px 16px">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <!-- Avatar -->
+        <div style="width:44px;height:44px;border-radius:50%;background:${u.avatarColor||'#6B4EFF'};display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:white;flex-shrink:0;overflow:hidden;border:2px solid ${isVer?'#3b82f6':isPro?'var(--orange)':'transparent'}">
+          ${u.avatarURL?`<img src="${u.avatarURL}" style="width:100%;height:100%;object-fit:cover">`:ini||'?'}
+        </div>
+        <!-- Info -->
+        <div style="flex:1;min-width:140px">
+          <div style="font-size:14px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            ${name}
+            ${isVer?'<span style="background:#3b82f6;border-radius:50%;width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0"><svg viewBox="0 0 24 24" width="9" height="9"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="white"/></svg></span>':''}
+            ${isPro?'<span style="background:var(--orange);color:white;border-radius:4px;padding:1px 6px;font-size:9px;font-weight:700">PRO</span>':''}
+          </div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:3px">${u.email||'—'}</div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${u.role||'—'} · 📁 ${u.projectCount||0} projects · 👁 ${u.profileViews||0} views</div>
+        </div>
+        <!-- Action buttons -->
+        <div style="display:flex;gap:6px;flex-wrap:wrap;flex-shrink:0">
+          ${isVer
+            ? `<button onclick="adminToggleVerified('${u.id}',false)" style="background:rgba(239,68,68,0.15);color:#f87171;border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap">✕ Badge ගනිමු</button>`
+            : `<button onclick="adminToggleVerified('${u.id}',true)"  style="background:rgba(59,130,246,0.15);color:#60a5fa;border:1px solid rgba(59,130,246,0.3);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap">✓ Verified දෙමු</button>`
+          }
+          ${isPro
+            ? `<button onclick="adminTogglePro('${u.id}',false)" style="background:rgba(239,68,68,0.12);color:#f87171;border:1px solid rgba(239,68,68,0.25);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap">✕ Pro ගනිමු</button>`
+            : `<button onclick="adminTogglePro('${u.id}',true)"  style="background:rgba(255,92,0,0.15);color:var(--orange);border:1px solid rgba(255,92,0,0.3);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap">⭐ Pro දෙමු</button>`
+          }
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+window.adminSearchUsers = function(searchVal){
+  if(!_allUsers || _allUsers.length === 0){
+    // Data load නෑ — reload
+    loadAdminPanel();
+    return;
+  }
+  const q = (searchVal||'').toLowerCase().trim();
+  if(!q){ renderAdminUsers(_allUsers); return; }
+  const filtered = _allUsers.filter(u=>
+    `${u.firstName||''} ${u.lastName||''}`.toLowerCase().includes(q) ||
+    (u.email||'').toLowerCase().includes(q) ||
+    (u.role||'').toLowerCase().includes(q)
+  );
+  renderAdminUsers(filtered);
+};
+
+window.adminToggleVerified = async function(uid, give){
+  if(!isAdmin()){ showToast('❌ Admin access naha'); return; }
+  try{
+    await updateDoc(doc(db,'users',uid), {verified: give});
+    // Update all projects by this user
+    const pSnap = await getDocs(query(collection(db,'projects'),where('authorId','==',uid)));
+    await Promise.all(pSnap.docs.map(d=>updateDoc(d.ref,{authorVerified: give})));
+    const idx = _allUsers.findIndex(u=>u.id===uid);
+    if(idx>-1) _allUsers[idx].verified = give;
+    window.adminSearchUsers(document.getElementById('adminSearchInput')?.value||'');
+    showToast(give ? '✅ Verified badge දුන්නා!' : '🗑 Badge ගත්තා!');
+  }catch(e){ showToast('❌ '+e.message); }
+};
+
+window.adminTogglePro = async function(uid, give){
+  if(!isAdmin()){ showToast('❌ Admin access naha'); return; }
+  try{
+    await updateDoc(doc(db,'users',uid), {isPro: give});
+    // Update all projects by this user
+    const pSnap = await getDocs(query(collection(db,'projects'),where('authorId','==',uid)));
+    await Promise.all(pSnap.docs.map(d=>updateDoc(d.ref,{authorIsPro: give})));
+    const idx = _allUsers.findIndex(u=>u.id===uid);
+    if(idx>-1) _allUsers[idx].isPro = give;
+    window.adminSearchUsers(document.getElementById('adminSearchInput')?.value||'');
+    showToast(give ? '⭐ Pro plan දුන්නා!' : '🗑 Pro ගත්තා!');
+  }catch(e){ showToast('❌ '+e.message); }
+};
+
+// ── HELPERS ─────────────────────────────────────────────────
+function v(id){return (document.getElementById(id)?.value||'').trim();}
+
+function skeletonCards(n){
+  return Array(n).fill(0).map(()=>`
+    <div style="background:var(--surface);border-radius:16px;overflow:hidden;border:1px solid var(--border)">
+      <div class="skeleton" style="height:200px"></div>
+      <div style="padding:16px"><div class="skeleton" style="height:16px;width:70%;margin-bottom:10px"></div><div class="skeleton" style="height:12px;width:40%"></div></div>
+    </div>`).join('');
+}
+
+function emptyState(icon,title,sub,btnText,btnAction){
+  return `<div class="empty-state" style="grid-column:1/-1">
+    <div class="empty-icon">${icon}</div>
+    <div class="empty-title">${title}</div>
+    <div class="empty-sub">${sub}</div>
+    ${btnText?`<button class="btn btn-primary" onclick="${btnAction}">+ ${btnText}</button>`:''}
+  </div>`;
+}
+
+// ── INIT ─────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded',()=>{
+  loadPublicProjects();
+  initUploadZone();
+});
+
+window.initUploadZone=function(){
+  const zone=document.getElementById('uploadZone');
+  const input=document.getElementById('up_file');
+  if(!zone||!input) return;
+  zone.addEventListener('click',()=>input.click());
+  zone.addEventListener('dragover',e=>{e.preventDefault();zone.style.borderColor='var(--orange)';zone.style.background='var(--orange-pale)';});
+  zone.addEventListener('dragleave',()=>{zone.style.borderColor='var(--border2)';zone.style.background='var(--bg2)';});
+  zone.addEventListener('drop',e=>{e.preventDefault();zone.style.borderColor='var(--border2)';zone.style.background='var(--bg2)';if(e.dataTransfer.files.length){input.files=e.dataTransfer.files;previewFile(input.files[0]);}});
+  input.addEventListener('change',()=>{if(input.files[0])previewFile(input.files[0]);});
+};
+
+function previewFile(file){
+  const zone=document.getElementById('uploadZone');
+  if(file.type.startsWith('image/')){
+    const r=new FileReader();
+    r.onload=e=>{zone.innerHTML=`<img src="${e.target.result}" style="max-height:160px;border-radius:8px;object-fit:contain"><p style="margin-top:8px;font-size:12px;color:var(--text-muted)">${file.name} (${(file.size/1024/1024).toFixed(1)}MB)</p>`;};
+    r.readAsDataURL(file);
+  }else{
+    zone.innerHTML=`<div style="font-size:32px">🎬</div><p style="margin-top:8px;color:var(--text)">${file.name}</p><p style="font-size:12px;color:var(--text-muted)">${(file.size/1024/1024).toFixed(1)} MB</p>`;
+  }
+}
+
+// ── NOTIFICATION PANEL ───────────────────────────────────────
+window.toggleNotifPanel=async function(){
+  const panel=document.getElementById('notifPanel');
+  if(panel.style.display==='block'){panel.style.display='none';return;}
+  panel.style.display='block';
+  if(!CU){panel.innerHTML='<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">Sign in to see briefs</div>';return;}
+  panel.innerHTML='<div style="padding:16px;text-align:center;color:var(--text-muted);font-size:12px">Loading...</div>';
+  try{
+    const q=query(collection(db,"inquiries"),where("creativeId","==",CU.uid));
+    const snap=await getDocs(q);
+    const notifDocs=snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+    if(notifDocs.length===0){panel.innerHTML='<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">No briefs yet 📭</div>';return;}
+    const headerHTML=`<div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center"><span style="font-size:12px;font-weight:700;color:var(--text);letter-spacing:.5px">CLIENT BRIEFS</span><span style="font-size:11px;color:var(--text-muted)">${notifDocs.length} total</span></div>`;
+    const briefs=notifDocs.slice(0,5).map(i=>{
+      const isUnread=!i.read;
+      return `<div style="padding:14px 16px;border-bottom:1px solid var(--border);${isUnread?'background:var(--surface2)':''}">
+        <div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:8px">
+          <div style="width:32px;height:32px;border-radius:50%;background:${isUnread?'var(--orange-pale)':'var(--surface3)'};display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0">${isUnread?'🔔':'📩'}</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${i.projectTitle}</div>
+            <div style="font-size:11px;color:var(--text-muted)">from <strong style="color:var(--text)">${i.name}</strong></div>
+          </div>
+          ${isUnread?'<span style="width:7px;height:7px;border-radius:50%;background:var(--orange);flex-shrink:0;margin-top:4px"></span>':''}
+        </div>
+        <div style="background:var(--surface3);border-radius:8px;padding:8px 12px;font-size:12px;line-height:1.8;color:var(--text-muted);margin-bottom:8px">
+          <div>🎨 <span style="color:var(--text)">${i.projectType||'—'}</span></div>
+          <div>💰 <span style="color:var(--text)">${i.budget||'—'}</span></div>
+          <div>📱 <span style="color:var(--text)">${i.whatsapp||'—'}</span></div>
+          ${i.notes?`<div style="margin-top:4px;padding-top:4px;border-top:1px solid var(--border)">📝 <span style="color:var(--text)">${i.notes}</span></div>`:''}
+        </div>
+        <div style="display:flex;gap:6px">
+          <a href="https://wa.me/${i.whatsapp}" target="_blank" style="flex:1;text-align:center;font-size:11px;background:#25D366;color:white;padding:6px 10px;border-radius:8px;text-decoration:none;font-weight:600">💬 WhatsApp</a>
+          ${!i.read?`<button onclick="markInquiryRead('${i.id}');toggleNotifPanel()" style="font-size:11px;background:var(--surface3);color:var(--text-muted);padding:6px 10px;border-radius:8px;border:none;cursor:pointer;font-weight:500">✓ Read</button>`:''}
+          <button onclick="deleteInquiry('${i.id}')" style="font-size:13px;background:rgba(239,68,68,0.12);color:#f87171;padding:6px 9px;border-radius:8px;border:none;cursor:pointer" title="Delete">🗑</button>
+        </div>
+      </div>`;
+    }).join('');
+    panel.innerHTML=headerHTML+briefs+'<div style="padding:12px 16px;text-align:center"><button onclick="showPage(\'dashboard\');toggleNotifPanel();setTimeout(()=>document.getElementById(\'dashTabInquiries\').click(),200)" style="font-size:12px;color:var(--orange);background:none;border:none;cursor:pointer;font-weight:500">See all briefs →</button></div>';
+  }catch(e){panel.innerHTML='<div style="padding:16px;color:var(--text-muted);font-size:12px">Error loading</div>';}
+};
+
+document.addEventListener('click',e=>{
+  const panel=document.getElementById('notifPanel');
+  if(panel&&panel.style.display==='block'&&!panel.contains(e.target)&&!document.getElementById('notifBtn').contains(e.target)){
+    panel.style.display='none';
+  }
+});
+</script>
+
+<style>
+:root{
+  --orange:#FF5C00;--orange-pale:rgba(255,92,0,0.12);
+  --bg:#0D0D0D;--bg2:#141414;--bg3:#1C1C1C;
+  --surface:#1E1E1E;--surface2:#252525;--surface3:#2C2C2C;
+  --border:rgba(255,255,255,0.07);--border2:rgba(255,255,255,0.13);
+  --text:#F0EEE8;--text-muted:#777;--text-light:#444;
+  --radius:14px;--radius-sm:9px;
+  --font-display:'Syne',sans-serif;--font-body:'DM Sans',sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:var(--font-body);background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;}
+.page{display:none;}.page.active{display:block;}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:9px 18px;border-radius:var(--radius-sm);font-size:14px;font-weight:500;font-family:var(--font-body);cursor:pointer;transition:all .18s;border:1px solid transparent;text-decoration:none;}
+.btn-ghost{background:transparent;color:var(--text-muted);border-color:var(--border2);}
+.btn-ghost:hover{background:var(--surface);color:var(--text);}
+.btn-primary{background:var(--orange);color:#fff;border-color:var(--orange);}
+.btn-primary:hover{background:#e64f00;}
+.btn-sm{padding:7px 14px;font-size:13px;}
+.badge{display:inline-flex;align-items:center;padding:3px 10px;border-radius:100px;font-size:11px;font-weight:500;}
+.badge-orange{background:var(--orange-pale);color:var(--orange);}
+.badge-purple{background:rgba(107,78,255,0.15);color:#a78bfa;}
+.badge-blue{background:rgba(59,130,246,0.15);color:#60a5fa;}
+.badge-green{background:rgba(34,197,94,0.15);color:#4ade80;}
+.badge-gray{background:var(--surface2);color:var(--text-muted);border:1px solid var(--border);}
+.skeleton{background:linear-gradient(90deg,var(--surface) 25%,var(--surface2) 50%,var(--surface) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:8px;}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,92,0,.4)}50%{box-shadow:0 0 0 6px rgba(255,92,0,0)}}
+
+/* NAV */
+nav{position:sticky;top:0;z-index:200;background:rgba(13,13,13,.92);backdrop-filter:blur(16px);border-bottom:1px solid var(--border);padding:0 2rem;height:64px;display:flex;align-items:center;justify-content:space-between;}
+.nav-logo{font-family:var(--font-display);font-size:22px;font-weight:800;color:var(--text);letter-spacing:-.5px;cursor:pointer;}
+.nav-logo span{color:var(--orange);}
+.nav-links{display:flex;gap:2rem;list-style:none;align-items:center;}
+.nav-links a{text-decoration:none;color:var(--text-muted);font-size:14px;cursor:pointer;transition:color .2s;}
+.nav-links a:hover,.nav-links a.active{color:var(--text);}
+.nav-actions{display:flex;gap:10px;align-items:center;}
+.avatar{border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;flex-shrink:0;}
+
+/* NOTIF */
+.notif-wrap{position:relative;}
+#notifBtn{background:var(--surface);border:1px solid var(--border2);border-radius:50%;width:38px;height:38px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:18px;}
+#notifBtn:hover{background:var(--surface2);}
+#notifDot{position:absolute;top:-2px;right:-2px;background:var(--orange);color:white;border-radius:50%;width:18px;height:18px;font-size:10px;font-weight:700;display:none;align-items:center;justify-content:center;border:2px solid var(--bg);}
+#navNotifBadge{position:absolute;top:-4px;right:-4px;background:var(--orange);color:white;border-radius:100px;min-width:18px;height:18px;padding:0 4px;font-size:10px;font-weight:700;display:none;align-items:center;justify-content:center;border:2px solid var(--bg);}
+#notifPanel{position:absolute;top:52px;right:0;width:320px;background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius);box-shadow:0 8px 32px rgba(0,0,0,.5);display:none;z-index:300;max-height:400px;overflow-y:auto;}
+
+/* HERO */
+.hero{padding:80px 2rem 60px;max-width:1200px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:60px;align-items:center;}
+.hero-eyebrow{display:inline-flex;align-items:center;gap:8px;background:var(--orange-pale);color:var(--orange);font-size:12px;font-weight:500;padding:6px 14px;border-radius:100px;margin-bottom:24px;}
+.hero-eyebrow::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--orange);}
+.hero h1{font-family:var(--font-display);font-size:54px;font-weight:800;line-height:1.05;letter-spacing:-2px;color:var(--text);margin-bottom:20px;}
+.hero h1 em{color:var(--orange);font-style:normal;}
+.hero p{font-size:16px;color:var(--text-muted);line-height:1.7;margin-bottom:32px;max-width:440px;}
+.hero-cards-stack{position:relative;width:320px;height:360px;}
+.hero-card{position:absolute;background:var(--surface);border:1px solid var(--border2);border-radius:16px;padding:16px;width:260px;}
+.hero-card:nth-child(1){top:0;left:0;transform:rotate(-4deg);}
+.hero-card:nth-child(2){top:40px;left:40px;transform:rotate(2deg);z-index:2;}
+.hero-card:nth-child(3){top:80px;left:80px;z-index:3;}
+.hero-card-thumb{width:100%;height:100px;border-radius:10px;margin-bottom:12px;display:flex;align-items:center;justify-content:center;font-size:32px;}
+.hero-card-name{font-family:var(--font-display);font-size:13px;font-weight:700;color:var(--text);}
+.hero-card-role{font-size:11px;color:var(--text-muted);margin-top:2px;}
+
+/* STATS */
+.stats-bar{border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:var(--bg2);padding:20px 2rem;}
+.stats-inner{max-width:1200px;margin:0 auto;display:flex;gap:40px;justify-content:center;flex-wrap:wrap;}
+.stat-item{text-align:center;}
+.stat-num{font-family:var(--font-display);font-size:26px;font-weight:800;color:var(--text);line-height:1;}
+.stat-label{font-size:12px;color:var(--text-muted);margin-top:4px;}
+
+/* SECTION */
+.section{max-width:1200px;margin:0 auto;padding:60px 2rem;}
+.section-header{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:32px;}
+.section-title{font-family:var(--font-display);font-size:26px;font-weight:800;color:var(--text);letter-spacing:-.5px;}
+.section-title span{color:var(--orange);}
+.filter-tabs{display:flex;gap:8px;flex-wrap:wrap;}
+.filter-tab{padding:7px 16px;border-radius:100px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--text-muted);transition:all .18s;}
+.filter-tab:hover{border-color:var(--orange);color:var(--orange);}
+.filter-tab.active{background:var(--text);color:var(--bg);border-color:var(--text);}
+
+/* GRID */
+.portfolio-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:20px;}
+.portfolio-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;overflow:hidden;transition:all .22s;cursor:pointer;}
+.portfolio-card:hover{border-color:var(--border2);transform:translateY(-3px);}
+.portfolio-thumb{width:100%;height:200px;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;}
+.portfolio-thumb-overlay{position:absolute;inset:0;background:rgba(0,0,0,0);transition:background .2s;}
+.portfolio-card:hover .portfolio-thumb-overlay{background:rgba(0,0,0,.15);}
+.portfolio-info{padding:16px;}
+.portfolio-info-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;}
+.portfolio-title{font-family:var(--font-display);font-size:15px;font-weight:700;color:var(--text);}
+.portfolio-creator{display:flex;align-items:center;gap:8px;margin-top:8px;}
+.creator-name{font-size:12px;color:var(--text-muted);}
+.portfolio-stats{display:flex;gap:14px;align-items:center;margin-top:12px;padding-top:12px;border-top:1px solid var(--border);}
+.pstat{font-size:12px;color:var(--text-muted);}
+.pstat strong{color:var(--text);font-weight:500;}
+
+/* EMPTY STATE */
+.empty-state{text-align:center;padding:80px 20px;}
+.empty-icon{font-size:52px;margin-bottom:20px;opacity:.4;}
+.empty-title{font-family:var(--font-display);font-size:20px;font-weight:700;color:var(--text);margin-bottom:8px;}
+.empty-sub{font-size:14px;color:var(--text-muted);max-width:360px;margin:0 auto 24px;line-height:1.7;}
+
+/* CREATIVES */
+.profile-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px;}
+.profile-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px 20px;text-align:center;transition:all .22s;cursor:pointer;position:relative;}
+.profile-card:hover{border-color:var(--border2);transform:translateY(-2px);}
+.profile-avatar-big{width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;color:#fff;margin:0 auto 12px;overflow:hidden;}
+.profile-name{font-family:var(--font-display);font-size:16px;font-weight:700;color:var(--text);}
+.profile-role{font-size:12px;color:var(--text-muted);margin-top:3px;}
+.profile-location{font-size:11px;color:var(--text-light);margin-top:2px;}
+.profile-tags{display:flex;flex-wrap:wrap;gap:4px;justify-content:center;margin:12px 0;}
+.profile-stats-row{display:flex;justify-content:center;gap:20px;padding-top:12px;border-top:1px solid var(--border);}
+.pst{text-align:center;}
+.pst-num{font-size:16px;font-weight:700;font-family:var(--font-display);color:var(--text);}
+.pst-label{font-size:10px;color:var(--text-light);text-transform:uppercase;letter-spacing:.5px;}
+.verified-badge{position:absolute;top:12px;right:12px;width:22px;height:22px;border-radius:50%;background:var(--orange);display:flex;align-items:center;justify-content:center;}
+.verified-badge svg{width:12px;height:12px;fill:white;}
+
+/* JOBS */
+.jobs-list{display:flex;flex-direction:column;gap:12px;}
+.job-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px 24px;display:flex;align-items:center;gap:20px;transition:all .18s;cursor:pointer;}
+.job-card:hover{border-color:var(--orange);}
+.job-icon{width:48px;height:48px;border-radius:12px;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0;}
+.job-info{flex:1;}
+.job-title{font-family:var(--font-display);font-size:15px;font-weight:700;color:var(--text);margin-bottom:4px;}
+.job-company{font-size:13px;color:var(--text-muted);}
+.job-tags{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
+.job-salary{font-family:var(--font-display);font-size:16px;font-weight:700;color:var(--orange);white-space:nowrap;}
+
+/* PRICING */
+.pricing-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;max-width:700px;margin:0 auto;}
+.price-card{background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:32px 28px;position:relative;}
+.price-card.featured{border-color:var(--orange);border-width:2px;background:var(--surface2);}
+.price-badge{position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:var(--orange);color:white;font-size:11px;font-weight:700;padding:4px 14px;border-radius:100px;white-space:nowrap;}
+.price-plan{font-family:var(--font-display);font-size:18px;font-weight:800;color:var(--text);margin-bottom:6px;}
+.price-amount{font-family:var(--font-display);font-size:36px;font-weight:800;color:var(--text);line-height:1;margin:16px 0 6px;}
+.price-period{font-size:13px;color:var(--text-muted);}
+.price-features{list-style:none;margin:24px 0;}
+.price-features li{font-size:14px;color:var(--text-muted);padding:7px 0;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;}
+.price-features li::before{content:'✓';color:var(--orange);font-weight:700;font-size:13px;flex-shrink:0;}
+.price-features li.no{color:var(--text-light);}
+.price-features li.no::before{content:'×';color:var(--text-light);}
+
+/* MODAL */
+.modal-overlay{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.75);align-items:center;justify-content:center;padding:20px;}
+.modal-overlay.open{display:flex;}
+.modal{background:var(--surface);border:1px solid var(--border2);border-radius:20px;padding:36px 32px;width:100%;max-width:460px;position:relative;animation:modalIn .2s ease;max-height:90vh;overflow-y:auto;}
+@keyframes modalIn{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
+.modal-close{position:absolute;top:16px;right:16px;background:var(--surface2);border:none;border-radius:50%;width:32px;height:32px;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);}
+.modal-close:hover{background:var(--surface3);color:var(--text);}
+.modal-title{font-family:var(--font-display);font-size:22px;font-weight:800;color:var(--text);margin-bottom:6px;}
+.modal-sub{font-size:14px;color:var(--text-muted);margin-bottom:24px;}
+.form-group{margin-bottom:16px;}
+.form-label{font-size:13px;font-weight:500;color:var(--text-muted);display:block;margin-bottom:6px;}
+.form-input,.form-select,.form-textarea{width:100%;padding:10px 14px;border:1px solid var(--border2);border-radius:var(--radius-sm);font-size:14px;font-family:var(--font-body);color:var(--text);background:var(--bg2);outline:none;transition:border-color .18s;appearance:none;}
+.form-input:focus,.form-select:focus,.form-textarea:focus{border-color:var(--orange);}
+.form-textarea{resize:vertical;}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+.modal-tabs{display:flex;border-bottom:1px solid var(--border);margin-bottom:24px;}
+.modal-tab{flex:1;padding:12px;text-align:center;cursor:pointer;font-size:14px;font-weight:500;color:var(--text-muted);border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .18s;}
+.modal-tab.active{color:var(--orange);border-bottom-color:var(--orange);}
+.upload-zone{border:2px dashed var(--border2);border-radius:var(--radius);padding:32px;text-align:center;cursor:pointer;transition:all .2s;background:var(--bg2);}
+.upload-zone:hover{border-color:var(--orange);background:var(--orange-pale);}
+.pro-lock{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 16px;display:flex;align-items:center;gap:10px;margin-top:8px;}
+.pro-lock-icon{font-size:20px;}
+.pro-lock-text{font-size:13px;color:var(--text-muted);}
+.pro-lock-text strong{color:var(--orange);}
+
+/* DASHBOARD */
+.dashboard{max-width:1200px;margin:0 auto;padding:40px 2rem;}
+.dash-grid{display:grid;grid-template-columns:220px 1fr;gap:24px;}
+.dash-sidebar{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px;height:fit-content;position:sticky;top:84px;}
+.dash-nav{list-style:none;}
+.dash-nav li{padding:10px 14px;border-radius:var(--radius-sm);cursor:pointer;font-size:14px;font-weight:500;color:var(--text-muted);margin-bottom:2px;transition:all .15s;display:flex;align-items:center;gap:10px;}
+.dash-nav li:hover{background:var(--surface2);color:var(--text);}
+.dash-nav li.active{background:var(--surface2);color:var(--text);}
+.dash-stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;}
+.dash-stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;}
+.dash-stat-val{font-family:var(--font-display);font-size:26px;font-weight:800;color:var(--text);line-height:1;}
+.dash-stat-label{font-size:12px;color:var(--text-muted);margin-top:4px;}
+.dash-stat-note{font-size:11px;color:var(--orange);margin-top:6px;font-weight:500;}
+.dash-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:16px;}
+.dash-card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;}
+.dash-card-title{font-family:var(--font-display);font-size:15px;font-weight:700;color:var(--text);}
+.project-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);}
+.project-row:last-child{border-bottom:none;}
+.project-row-info{flex:1;}
+.project-row-name{font-size:14px;font-weight:500;color:var(--text);}
+.project-row-meta{font-size:12px;color:var(--text-muted);margin-top:2px;}
+.dash-tab-bar{display:flex;border-bottom:1px solid var(--border);margin-bottom:20px;}
+.dash-tab{padding:10px 16px;cursor:pointer;font-size:13px;font-weight:500;color:var(--text-muted);border-bottom:2px solid transparent;transition:all .15s;}
+.dash-tab.active{color:var(--orange);border-bottom-color:var(--orange);}
+.dash-tab-content{display:none;}.dash-tab-content.active{display:block;}
+
+/* PROFILE PAGE */
+.profile-page{max-width:1000px;margin:0 auto;padding:40px 2rem;}
+.profile-hero{display:flex;gap:32px;align-items:flex-start;margin-bottom:40px;}
+#page-profile{padding:0;}
+@media(max-width:640px){#pvHeroBanner{height:180px!important;}}
+.profile-hero-avatar{width:96px;height:96px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:36px;font-weight:800;color:white;flex-shrink:0;overflow:hidden;background-size:cover;background-position:center;}
+.profile-hero-name{font-family:var(--font-display);font-size:28px;font-weight:800;color:var(--text);display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.profile-hero-role{font-size:16px;color:var(--text-muted);margin-top:4px;}
+.profile-hero-bio{font-size:14px;color:var(--text-muted);margin-top:12px;line-height:1.7;max-width:600px;}
+
+/* EDIT PROFILE MODAL — big */
+#modal-editprofile .modal{max-width:680px;}
+.ep-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;}
+.profile-preview-card{background:var(--bg2);border:1px solid var(--border2);border-radius:16px;padding:20px;text-align:center;position:sticky;top:0;}
+.preview-avatar{width:56px;height:56px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:white;margin:0 auto 12px;}
+
+/* FOOTER */
+footer{border-top:1px solid var(--border);background:var(--bg2);margin-top:60px;}
+.footer-inner{max-width:1200px;margin:0 auto;padding:48px 2rem 32px;display:grid;grid-template-columns:1.5fr 1fr 1fr 1fr;gap:40px;}
+.footer-brand-name{font-family:var(--font-display);font-size:20px;font-weight:800;color:var(--text);margin-bottom:12px;}
+.footer-brand-name span{color:var(--orange);}
+.footer-brand-desc{font-size:13px;color:var(--text-muted);line-height:1.7;}
+.footer-col h4{font-size:12px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--text-light);margin-bottom:16px;}
+.footer-col ul{list-style:none;}
+.footer-col ul li{margin-bottom:10px;}
+.footer-col ul li a{color:var(--text-muted);font-size:14px;text-decoration:none;transition:color .15s;cursor:pointer;}
+.footer-col ul li a:hover{color:var(--text);}
+.footer-bottom{max-width:1200px;margin:0 auto;padding:20px 2rem;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;}
+.footer-bottom p{font-size:12px;color:var(--text-light);}
+
+.toast{position:fixed;bottom:24px;right:24px;z-index:999;background:var(--surface3);color:var(--text);border:1px solid var(--border2);padding:12px 20px;border-radius:var(--radius-sm);font-size:14px;font-weight:500;transform:translateY(80px);opacity:0;transition:all .3s;pointer-events:none;}
+.toast.show{transform:translateY(0);opacity:1;}
+html{scroll-behavior:smooth;}
+
+@media(max-width:768px){
+  .hero{grid-template-columns:1fr;}.hero h1{font-size:36px;}
+  .hero-cards-stack{display:none;}
+  .pricing-grid{grid-template-columns:1fr;}
+  .dash-grid{grid-template-columns:1fr;}
+  .dash-stats-row{grid-template-columns:1fr 1fr;}
+  .footer-inner{grid-template-columns:1fr 1fr;}
+  .nav-links{display:none;}
+  .ep-grid{grid-template-columns:1fr;}
+}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-logo" onclick="showPage('discover')">Creativo<span>.</span></div>
+  <ul class="nav-links">
+    <li><a class="active" onclick="showPage('discover');setActive(this)">Discover</a></li>
+    <li><a onclick="showPage('creatives');setActive(this);loadPublicCreatives()">Creatives</a></li>
+    <li><a onclick="showPage('jobs');setActive(this);loadJobs()">Jobs</a></li>
+    <li><a onclick="showPage('pricing');setActive(this)">Pricing</a></li>
+  </ul>
+  <div class="nav-actions">
+    <div class="notif-wrap" style="position:relative">
+      <button id="notifBtn" onclick="toggleNotifPanel()" title="Briefs & Notifications">🔔</button>
+      <div id="notifDot" style="position:absolute;top:-2px;right:-2px;background:var(--orange);color:white;border-radius:50%;width:18px;height:18px;font-size:10px;font-weight:700;display:none;align-items:center;justify-content:center;border:2px solid var(--bg)"><span id="notifBadge">0</span></div>
+      <div id="notifPanel"></div>
+    </div>
+    <button class="btn btn-ghost" id="navSignIn" onclick="openModal('auth')">Sign In</button>
+    <button class="btn btn-primary" id="navJoin" onclick="openModal('auth')">Join Free</button>
+    <div id="navDash" style="display:none;align-items:center;gap:10px;position:relative">
+      <a id="navMyPortfolio" style="font-size:13px;font-weight:600;color:var(--orange);cursor:pointer;text-decoration:none;display:none" onclick="openMyPortfolio()">My Portfolio</a>
+      <div class="avatar" id="navAvatar" style="background:#FF5C00;width:34px;height:34px;font-size:13px;cursor:pointer" onclick="showPage('dashboard');loadDashboard()"></div>
+      <span id="navUserName" style="font-size:14px;font-weight:500;cursor:pointer" onclick="showPage('dashboard');loadDashboard()"></span>
+      <div id="navNotifBadge" style="display:none"></div>
+    </div>
+    <button class="btn btn-ghost" id="navSignOut" style="display:none" onclick="doSignOut()">Sign Out</button>
+  </div>
+</nav>
+
+<!-- DISCOVER -->
+<div class="page active" id="page-discover">
+  <div class="hero">
+    <div>
+      <div class="hero-eyebrow">Sri Lanka's Creative Platform</div>
+      <h1>Your Work,<br><em>Seen.</em> Your<br>Career, Built.</h1>
+      <p>The home for Sri Lanka's graphic designers and video editors. Build a portfolio, get discovered by brands, and get hired.</p>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        <button class="btn btn-primary" style="font-size:15px;padding:12px 24px" onclick="openModal('auth')">Build Your Portfolio — Free</button>
+        <button class="btn btn-ghost" style="font-size:15px;padding:12px 24px" onclick="document.getElementById('discoverSection').scrollIntoView({behavior:'smooth'})">Browse Work</button>
+      </div>
+    </div>
+    <div style="position:relative;height:420px;display:flex;align-items:center;justify-content:center">
+      <div class="hero-cards-stack">
+        <div class="hero-card"><div class="hero-card-thumb" style="background:linear-gradient(135deg,#667eea,#764ba2)">🎨</div><div class="hero-card-name">Tharaka Silva</div><div class="hero-card-role">Brand Designer · Colombo</div><div style="margin-top:8px"><span class="badge badge-purple">Graphic Design</span></div></div>
+        <div class="hero-card"><div class="hero-card-thumb" style="background:linear-gradient(135deg,#f093fb,#f5576c)">🎬</div><div class="hero-card-name">Rashmi Fernando</div><div class="hero-card-role">Motion Designer · Kandy</div><div style="margin-top:8px"><span class="badge badge-orange">Motion</span></div></div>
+        <div class="hero-card"><div class="hero-card-thumb" style="background:linear-gradient(135deg,#4facfe,#00f2fe)">✨</div><div class="hero-card-name">Dilshan Perera</div><div class="hero-card-role">Video Editor · Galle</div><div style="margin-top:8px"><span class="badge badge-blue">Video Edit</span></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="stats-bar"><div class="stats-inner">
+    <div class="stat-item"><div class="stat-num">840+</div><div class="stat-label">Active Creatives</div></div>
+    <div class="stat-item"><div class="stat-num">2,300+</div><div class="stat-label">Projects Published</div></div>
+    <div class="stat-item"><div class="stat-num">380+</div><div class="stat-label">Clients & Brands</div></div>
+    <div class="stat-item"><div class="stat-num">94%</div><div class="stat-label">Hire Rate (Pro)</div></div>
+  </div></div>
+  <div class="section" id="discoverSection">
+    <div class="section-header">
+      <div class="section-title">Discover <span>Work</span></div>
+      <div class="filter-tabs" id="discoverFilters">
+        <div class="filter-tab active" onclick="filterProjects('all',this)">All</div>
+        <div class="filter-tab" onclick="filterProjects('Graphic Design',this)">Graphic Design</div>
+        <div class="filter-tab" onclick="filterProjects('Video Edit',this)">Video Edit</div>
+        <div class="filter-tab" onclick="filterProjects('Motion Graphics',this)">Motion</div>
+        <div class="filter-tab" onclick="filterProjects('Branding',this)">Branding</div>
+        <div class="filter-tab" onclick="filterProjects('Social Media',this)">Social Media</div>
+        <div class="filter-tab" onclick="filterProjects('Reels / Shorts',this)">Reels</div>
+        <div class="filter-tab" onclick="filterProjects('Wedding & Events',this)">Wedding</div>
+      </div>
+    </div>
+    <div class="portfolio-grid" id="projectGrid"></div>
+  </div>
+</div>
+
+<!-- CREATIVES -->
+<div class="page" id="page-creatives">
+  <div class="section">
+    <div class="section-header">
+      <div class="section-title">Find <span>Creatives</span></div>
+      <div class="filter-tabs" id="creativeFilters">
+        <div class="filter-tab active" onclick="loadPublicCreatives('all');setTabActive(this,'creativeFilters')">All</div>
+        <div class="filter-tab" onclick="loadPublicCreatives('graphic');setTabActive(this,'creativeFilters')">Graphic Designers</div>
+        <div class="filter-tab" onclick="loadPublicCreatives('video');setTabActive(this,'creativeFilters')">Video Editors</div>
+        <div class="filter-tab" onclick="loadPublicCreatives('motion');setTabActive(this,'creativeFilters')">Motion Artists</div>
+      </div>
+    </div>
+    <div class="profile-grid" id="creativesGrid"><div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text-muted)">Loading creatives...</div></div>
+  </div>
+</div>
+
+<!-- JOBS -->
+<div class="page" id="page-jobs">
+  <div class="section">
+    <div class="section-header">
+      <div class="section-title">Jobs <span>Board</span></div>
+      <button class="btn btn-primary btn-sm" onclick="openModal('postjob')">+ Post a Job</button>
+    </div>
+    <div class="jobs-list" id="jobsList"></div>
+  </div>
+</div>
+
+<!-- PRICING -->
+<div class="page" id="page-pricing">
+  <div class="section" style="text-align:center;padding-bottom:0">
+    <div class="section-title" style="font-size:34px;margin-bottom:12px">Simple, <span>Honest</span> Pricing</div>
+    <p style="color:var(--text-muted);font-size:16px;max-width:500px;margin:0 auto 48px">Start free. Upgrade when you're serious.</p>
+    <div class="pricing-grid">
+      <div class="price-card">
+        <div class="price-plan">Free</div>
+        <div class="price-amount" style="font-size:28px;color:var(--text-muted)">LKR 0</div>
+        <div class="price-period">Forever · No card needed</div>
+        <ul class="price-features">
+          <li>Public profile page</li><li>Up to 3 projects</li><li>250 MB storage</li>
+          <li>Hire Me button</li><li>Appear in search</li>
+          <li class="no">Verified badge</li><li class="no">Analytics</li>
+          <li class="no">Priority in search</li><li class="no">Social links</li>
+          <li class="no">Inquiry inbox</li><li class="no">Unlimited projects</li>
+        </ul>
+        <button class="btn btn-ghost" style="width:100%;justify-content:center" onclick="openModal('auth')">Get Started Free</button>
+      </div>
+      <div class="price-card featured">
+        <div class="price-badge">Most Popular</div>
+        <div class="price-plan">Pro</div>
+        <div class="price-amount">2,490</div>
+        <div class="price-period">LKR / month · or LKR 24,900/yr (save 2 months)</div>
+        <ul class="price-features">
+          <li>Everything in Free</li><li>Unlimited projects</li><li>5 GB storage</li>
+          <li>Verified badge ✓</li><li>Full analytics</li><li>Priority in search</li>
+          <li>Social links (IG, WA, YT, Behance…)</li><li>Inquiry inbox</li><li>Priority support</li>
+        </ul>
+        <button class="btn btn-primary" style="width:100%;justify-content:center" onclick="openModal('upgrade')">Upgrade to Pro</button>
+      </div>
+    </div>
+    <p style="margin-top:20px;font-size:13px;color:var(--text-muted)">Payment via bank transfer · Activated within 24hrs after WhatsApp confirmation</p>
+  </div>
+</div>
+
+<!-- DASHBOARD -->
+<div class="page" id="page-dashboard">
+  <div class="dashboard">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:32px">
+      <div>
+        <div style="font-family:var(--font-display);font-size:24px;font-weight:800;color:var(--text)">My Dashboard</div>
+        <div style="font-size:13px;color:var(--text-muted);margin-top:4px" id="dashPlanLabel">Free Plan</div>
+      </div>
+      <div style="display:flex;gap:10px">
+        <button class="btn btn-ghost" onclick="openEditProfile()">✏️ Edit Profile</button>
+        <button class="btn btn-primary" onclick="openModal('upload')">+ Upload Project</button>
+      </div>
+    </div>
+    <div class="dash-grid">
+      <div class="dash-sidebar">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid var(--border)">
+          <div class="avatar" id="dashAvatarInitials" style="background:#FF5C00;width:44px;height:44px;font-size:16px;overflow:hidden"></div>
+          <div>
+            <div style="font-size:14px;font-weight:600;color:var(--text)" id="dashUserName">Loading…</div>
+            <div style="font-size:11px;color:var(--text-muted)" id="dashPlanLabel2">—</div>
+          </div>
+        </div>
+        <ul class="dash-nav">
+          <li class="active" onclick="switchDashTab('overview',this)">📊 Overview</li>
+          <li onclick="switchDashTab('projects',this)">🖼️ My Projects</li>
+          <li onclick="switchDashTab('inquiries',this)" id="dashTabInquiries">📬 Briefs <span id="dashInqBadge" style="display:none;background:var(--orange);color:white;border-radius:100px;padding:1px 7px;font-size:10px;font-weight:700"></span></li>
+          <li onclick="openMyPortfolio()">🌐 My Portfolio</li>
+          <li onclick="openEditProfile()">👤 Edit Profile</li>
+          <li onclick="openModal('upload')">⬆️ Upload Project</li>
+          <li onclick="showPage('pricing')">⭐ Upgrade to Pro</li>
+          <li id="adminNavTab" onclick="switchDashTab('admin',this)" style="display:none;color:#f59e0b">🛡️ Admin Panel</li>
+          <li onclick="doSignOut()" style="margin-top:12px;padding-top:14px;border-top:1px solid var(--border)">🚪 Sign Out</li>
+        </ul>
+      </div>
+      <div>
+        <div class="dash-stats-row">
+          <div class="dash-stat"><div class="dash-stat-val" id="dashStatViews">0</div><div class="dash-stat-label">Project Views</div></div>
+          <div class="dash-stat"><div class="dash-stat-val" id="dashStatLikes">0</div><div class="dash-stat-label">Total Likes</div></div>
+          <div class="dash-stat"><div class="dash-stat-val" id="dashStatProjects">0</div><div class="dash-stat-label">Live Projects</div><div class="dash-stat-note" id="dashPlanNote">0/3 Free</div></div>
+          <div class="dash-stat"><div class="dash-stat-val" id="dashStatProfileViews">0</div><div class="dash-stat-label">Profile Views</div></div>
+        </div>
+        <!-- Tab contents -->
+        <div id="dashTabOverview" class="dash-tab-content active">
+          <div class="dash-card">
+            <div class="dash-card-header">
+              <span class="dash-card-title">📊 Overview</span>
+              <span id="dashOverviewPlan" style="font-size:11px;color:var(--text-muted)"></span>
+            </div>
+            <!-- Quick insight row -->
+            <div id="dashOverviewInsight" style="background:var(--surface2);border-radius:10px;padding:14px 16px;margin-bottom:16px;font-size:13px;color:var(--text-muted);line-height:1.6;display:none"></div>
+            <div class="dash-card-header" style="margin-top:4px"><span class="dash-card-title" style="font-size:14px">Recent Projects</span><button class="btn btn-ghost btn-sm" onclick="openModal('upload')">+ Add</button></div>
+            <div id="dashProjects"></div>
+          </div>
+        </div>
+        <div id="dashTabProjects" class="dash-tab-content">
+          <div class="dash-card">
+            <div class="dash-card-header"><span class="dash-card-title">🖼️ All My Projects</span><button class="btn btn-ghost btn-sm" onclick="openModal('upload')">+ Upload</button></div>
+            <div id="dashProjectsFull"></div>
+          </div>
+        </div>
+        <div id="dashTabInquiriesContent" class="dash-tab-content">
+          <div class="dash-card">
+            <div class="dash-card-header"><span class="dash-card-title">Client Briefs</span></div>
+            <div id="dashInquiries"></div>
+          </div>
+        </div>
+        <div id="dashTabAdmin" class="dash-tab-content">
+          <div class="dash-card">
+            <div class="dash-card-header">
+              <span class="dash-card-title">🛡️ Admin Panel — Users</span>
+              <span id="adminUserCount" style="font-size:11px;color:var(--text-muted);background:var(--surface3);padding:3px 10px;border-radius:100px"></span>
+            </div>
+            <div style="background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.3);border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:#f59e0b">
+              ✓ Verified badge &amp; ⭐ Pro plan grant/revoke karanna puluwang.
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:16px">
+              <input id="adminSearchInput" class="form-input" placeholder="🔍 Name, email search..." style="flex:1" oninput="adminSearchUsers(this.value)">
+              <button onclick="loadAdminPanel()" style="background:var(--surface3);color:var(--text-muted);border:1px solid var(--border2);border-radius:8px;padding:0 14px;cursor:pointer;font-size:13px;white-space:nowrap">↺ Refresh</button>
+            </div>
+            <div id="adminUsersList" style="display:flex;flex-direction:column;gap:8px"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- PROFILE PAGE -->
+<div class="page" id="page-profile">
+  <!-- Hero banner -->
+  <div id="pvHeroBanner" style="width:100%;height:260px;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%);position:relative;overflow:hidden">
+    <div id="pvHeroBannerOverlay" style="position:absolute;inset:0;background:rgba(0,0,0,.35)"></div>
+    <div id="pvHeroBannerEditBtn" style="display:none;position:absolute;top:16px;right:16px">
+      <button onclick="triggerBannerUpload()" style="background:rgba(255,255,255,.15);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.25);color:white;border-radius:8px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer">🖼 Change Cover</button>
+      <input type="file" id="bannerFileInput" accept="image/*" style="display:none" onchange="handleBannerUpload(this)">
+    </div>
+  </div>
+
+  <!-- Profile card -->
+  <div style="max-width:860px;margin:0 auto;padding:0 20px">
+    <div style="position:relative;margin-top:-60px;margin-bottom:28px">
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:28px 32px 24px">
+        <!-- Top row: avatar + actions -->
+        <div style="display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:16px;margin-bottom:20px">
+          <div style="position:relative">
+            <div id="pvAvatar" class="profile-hero-avatar" style="background:#6B4EFF;width:88px;height:88px;font-size:32px;border:4px solid var(--surface)">?</div>
+            <div id="pvAvatarEditBtn" style="display:none;position:absolute;bottom:0;right:0;background:var(--orange);border-radius:50%;width:26px;height:26px;display:none;align-items:center;justify-content:center;cursor:pointer;font-size:13px" onclick="openEditProfile()" title="Edit profile">✏️</div>
+          </div>
+          <div id="pvActionBtns" style="display:flex;gap:10px;flex-wrap:wrap"></div>
+        </div>
+        <!-- Name / role / username -->
+        <div style="margin-bottom:16px">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px">
+            <div class="profile-hero-name" id="pvName" style="font-size:26px">—</div>
+            <span id="pvProBadge" style="display:none" class="badge badge-orange">PRO</span>
+            <span id="pvVerifiedBadge" style="display:none" class="verified-badge"><svg viewBox="0 0 24 24" width="11" height="11"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="white"/></svg></span>
+          </div>
+          <div class="profile-hero-role" id="pvRole" style="font-size:14px;margin-bottom:6px">—</div>
+          <div id="pvUsername" style="font-size:12px;color:var(--text-muted)"></div>
+        </div>
+        <!-- Bio -->
+        <div class="profile-hero-bio" id="pvBio" style="margin-bottom:14px"></div>
+        <!-- Location pill -->
+        <div id="pvLocationPill" style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border-radius:100px;padding:5px 14px;font-size:12px;color:var(--text-muted);margin-bottom:16px">
+          📍 <span id="pvLocationText">Sri Lanka</span>
+        </div>
+        <!-- Tags & skills -->
+        <div id="pvTags" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
+        <div id="pvSkills" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px"></div>
+        <!-- Social links -->
+        <div id="pvSocial" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px"></div>
+        <!-- Stats row -->
+        <div style="display:flex;border-top:1px solid var(--border);padding-top:16px;gap:0">
+          <div style="flex:1;text-align:center;padding:4px 0">
+            <div style="font-family:var(--font-display);font-size:22px;font-weight:800;color:var(--text)" id="pvStatProjects">0</div>
+            <div style="font-size:10px;font-weight:600;letter-spacing:.8px;color:var(--text-muted);text-transform:uppercase;margin-top:2px">Projects</div>
+          </div>
+          <div style="width:1px;background:var(--border)"></div>
+          <div style="flex:1;text-align:center;padding:4px 0">
+            <div style="font-family:var(--font-display);font-size:22px;font-weight:800;color:var(--text)" id="pvStatLikes">0</div>
+            <div style="font-size:10px;font-weight:600;letter-spacing:.8px;color:var(--text-muted);text-transform:uppercase;margin-top:2px">Likes</div>
+          </div>
+          <div style="width:1px;background:var(--border)"></div>
+          <div style="flex:1;text-align:center;padding:4px 0">
+            <div style="font-family:var(--font-display);font-size:22px;font-weight:800;color:var(--text)" id="pvStatViews">0</div>
+            <div style="font-size:10px;font-weight:600;letter-spacing:.8px;color:var(--text-muted);text-transform:uppercase;margin-top:2px">Views</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Projects section -->
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px;margin-bottom:40px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+        <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:var(--text-muted);text-transform:uppercase">Projects</div>
+        <div id="pvUploadBtn" style="display:none"><button class="btn btn-primary btn-sm" onclick="openModal('upload')">+ Upload</button></div>
+      </div>
+      <div id="pvProjects"></div>
+    </div>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-inner">
+    <div>
+      <div class="footer-brand-name">Creativo<span>.</span></div>
+      <div class="footer-brand-desc">Sri Lanka's portfolio platform for graphic designers and video editors.</div>
+      <div style="margin-top:20px"><a href="https://wa.me/94720191167" class="btn btn-primary btn-sm" style="background:#25D366;border-color:#25D366">💬 WhatsApp Us</a></div>
+    </div>
+    <div class="footer-col"><h4>Platform</h4><ul>
+      <li><a onclick="showPage('discover')">Discover Work</a></li>
+      <li><a onclick="showPage('creatives');loadPublicCreatives()">Find Creatives</a></li>
+      <li><a onclick="showPage('jobs');loadJobs()">Jobs Board</a></li>
+      <li><a onclick="showPage('pricing')">Pricing</a></li>
+    </ul></div>
+    <div class="footer-col"><h4>Account</h4><ul>
+      <li><a onclick="openModal('auth')">Sign In</a></li>
+      <li><a onclick="openModal('auth')">Create Account</a></li>
+      <li><a onclick="showPage('dashboard');loadDashboard()">Dashboard</a></li>
+    </ul></div>
+    <div class="footer-col"><h4>Support</h4><ul>
+      <li><a>FAQ</a></li><li><a>Contact Us</a></li><li><a>Privacy Policy</a></li><li><a>Terms of Use</a></li>
+    </ul></div>
+  </div>
+  <div class="footer-bottom">
+    <p>© 2025 Creativo · Made for Sri Lankan Designers 🎨.</p>
+    <p>TikTok · Instagram · WhatsApp</p>
+  </div>
+</footer>
+
+<!-- MODALS -->
+
+<!-- AUTH -->
+<div class="modal-overlay" id="modal-auth">
+<div class="modal">
+  <button class="modal-close" onclick="closeModal('auth')">×</button>
+  <div class="modal-tabs">
+    <div class="modal-tab active" id="tab-signin" onclick="switchTab('signin')">Sign In</div>
+    <div class="modal-tab" id="tab-signup" onclick="switchTab('signup')">Create Account</div>
+  </div>
+  <div id="signin-form">
+    <div class="modal-title">Welcome back</div>
+    <div class="modal-sub">Sign in to your Creativo account.</div>
+    <div class="form-group"><label class="form-label">Email</label><input type="email" id="si_email" class="form-input" placeholder="you@example.com"></div>
+    <div class="form-group"><label class="form-label">Password</label><input type="password" id="si_password" class="form-input" placeholder="••••••••"></div>
+    <button class="btn btn-primary" style="width:100%;justify-content:center;padding:12px" onclick="doSignIn()">Sign In</button>
+    <p style="text-align:center;font-size:13px;color:var(--text-muted);margin-top:14px">No account? <a href="#" style="color:var(--orange)" onclick="switchTab('signup')">Create one free</a></p>
+  </div>
+  <div id="signup-form" style="display:none">
+    <div class="modal-title">Create your portfolio</div>
+    <div class="modal-sub">Free account · No credit card needed.</div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">First Name</label><input type="text" id="su_firstName" class="form-input" placeholder="Kasun"></div>
+      <div class="form-group"><label class="form-label">Last Name</label><input type="text" id="su_lastName" class="form-input" placeholder="Silva"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Email</label><input type="email" id="su_email" class="form-input" placeholder="you@example.com"></div>
+    <div class="form-group"><label class="form-label">I am a…</label>
+      <select id="su_role" class="form-select">
+        <option>Select your specialty</option>
+        <option>Graphic Designer</option><option>Video Editor</option>
+        <option>Motion Graphics Artist</option><option>Brand Designer</option>
+        <option>Illustrator</option><option>Social Media Designer</option>
+        <option>3D & VFX Artist</option><option>Cinematographer</option><option>Other</option>
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Password</label><input type="password" id="su_password" class="form-input" placeholder="••••••••"></div>
+    <button class="btn btn-primary" style="width:100%;justify-content:center;padding:12px" onclick="doSignUp()">Create Free Account</button>
+  </div>
+</div>
+</div>
+
+<!-- UPLOAD -->
+<div class="modal-overlay" id="modal-upload">
+<div class="modal" style="max-width:520px">
+  <button class="modal-close" onclick="closeModal('upload')">×</button>
+  <div class="modal-title">Upload New Project</div>
+  <div class="modal-sub">Share your work with the Creativo community.</div>
+  <div class="form-group"><label class="form-label">Project Title</label><input type="text" id="up_title" class="form-input" placeholder="e.g. Brand Identity for Café Mango"></div>
+  <div class="form-row">
+    <div class="form-group"><label class="form-label">Category</label>
+      <select id="up_category" class="form-select">
+        <option>Graphic Design</option><option>Branding</option><option>Social Media</option>
+        <option>Illustration</option><option>Video Edit</option><option>Motion Graphics</option>
+        <option>Reels / Shorts</option><option>Film / Cinematic</option>
+        <option>3D & VFX</option><option>Wedding & Events</option>
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Year</label>
+      <select class="form-select"><option>2025</option><option>2024</option><option>2023</option></select>
+    </div>
+  </div>
+  <div class="form-group"><label class="form-label">Description</label><textarea id="up_desc" class="form-textarea" rows="3" placeholder="Tell us about this project…"></textarea></div>
+  <div class="upload-zone" id="uploadZone">
+    <div style="font-size:36px;margin-bottom:8px">📁</div>
+    <div style="font-size:14px;font-weight:500;color:var(--text)">Drop files here or click to upload</div>
+    <div style="font-size:12px;color:var(--text-muted);margin-top:4px">Images or Video · Max 50MB free / 250MB Pro</div>
+  </div>
+  <input type="file" id="up_file" accept="image/*,video/mp4" style="display:none">
+  <button class="btn btn-primary" style="width:100%;justify-content:center;margin-top:16px;padding:12px" onclick="doUpload()">Publish Project</button>
+</div>
+</div>
+
+<!-- HIRE -->
+<div class="modal-overlay" id="modal-hire">
+<div class="modal" style="max-width:480px">
+  <button class="modal-close" onclick="closeModal('hire')">×</button>
+  <div class="modal-title">Send Project Brief</div>
+  <div class="modal-sub">Fill in the details — the creative will review and contact you.</div>
+  <input type="hidden" id="hire_creativeId"><input type="hidden" id="hire_creativeName">
+  <div class="form-group"><label class="form-label">Project Title</label><input type="text" id="hire_title" class="form-input" placeholder="e.g. Logo for my restaurant"></div>
+  <div class="form-row">
+    <div class="form-group"><label class="form-label">Project Type</label>
+      <select id="hire_type" class="form-select">
+        <option>Brand / Logo Design</option><option>Social Media Design</option>
+        <option>Video Editing</option><option>Motion Graphics</option>
+        <option>Wedding Video</option><option>Corporate Video</option><option>Other</option>
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Budget (LKR)</label>
+      <select id="hire_budget" class="form-select">
+        <option>Under 5,000</option><option>5,000 – 15,000</option>
+        <option>15,000 – 30,000</option><option>30,000 – 60,000</option>
+        <option>60,000+</option><option>Open to discuss</option>
+      </select>
+    </div>
+  </div>
+  <div class="form-group"><label class="form-label">Your Name</label><input type="text" id="hire_name" class="form-input" placeholder="Your full name"></div>
+  <div class="form-group"><label class="form-label">WhatsApp Number</label><input type="text" id="hire_wa" class="form-input" placeholder="+94 7X XXX XXXX"></div>
+  <div class="form-group"><label class="form-label">Notes</label><textarea id="hire_notes" class="form-textarea" rows="3" placeholder="Any extra details…"></textarea></div>
+  <button class="btn btn-primary" style="width:100%;justify-content:center;padding:12px" onclick="doHire()">Send Brief</button>
+</div>
+</div>
+
+<!-- EDIT PROFILE -->
+<div class="modal-overlay" id="modal-editprofile">
+<div class="modal" style="max-width:700px">
+  <button class="modal-close" onclick="closeModal('editprofile')">×</button>
+  <div class="modal-title">Edit Profile</div>
+  <div class="modal-sub">Your info & preview — social links require Pro.</div>
+  <div class="ep-grid">
+    <!-- LEFT: form -->
+    <div>
+      <!-- Avatar upload -->
+      <div class="form-group" style="display:flex;align-items:center;gap:16px;margin-bottom:20px">
+        <div id="epAvatarPreview" class="avatar" style="width:64px;height:64px;font-size:22px;font-weight:700;background:#FF5C00;flex-shrink:0;cursor:pointer;border:2px solid var(--border2);transition:opacity .2s" onclick="triggerAvatarUpload()" title="Click to change photo">?</div>
+        <div>
+          <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px">Profile Photo</div>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="triggerAvatarUpload()">📷 Upload Photo</button>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:4px">JPG or PNG · Max 5MB</div>
+        </div>
+        <input type="file" id="ep_avatar_file" accept="image/*" style="display:none" onchange="handleAvatarChange(this)">
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">First Name</label><input type="text" id="ep_firstName" class="form-input" oninput="updateProfilePreview()"></div>
+        <div class="form-group"><label class="form-label">Last Name</label><input type="text" id="ep_lastName" class="form-input" oninput="updateProfilePreview()"></div>
+      </div>
+      <div class="form-group"><label class="form-label">Role / Specialty</label>
+        <select id="ep_role" class="form-select" onchange="updateProfilePreview()">
+          <option>Graphic Designer</option><option>Video Editor</option>
+          <option>Motion Graphics Artist</option><option>Brand Designer</option>
+          <option>Illustrator</option><option>Social Media Designer</option>
+          <option>3D & VFX Artist</option><option>Cinematographer</option><option>Other</option>
+        </select>
+      </div>
+      <div class="form-group"><label class="form-label">Location</label><input type="text" id="ep_location" class="form-input" placeholder="e.g. Colombo" oninput="updateProfilePreview()"></div>
+      <div class="form-group"><label class="form-label">Bio</label><textarea id="ep_bio" class="form-textarea" rows="3" placeholder="Tell clients about yourself…" oninput="updateProfilePreview()"></textarea></div>
+      <div class="form-group"><label class="form-label">Skills (comma separated)</label><input type="text" id="ep_skills" class="form-input" placeholder="Photoshop, Figma, After Effects" oninput="updateProfilePreview()"></div>
+      <div class="form-group"><label class="form-label">Tags (comma separated)</label><input type="text" id="ep_tags" class="form-input" placeholder="Branding, Logo, Social Media" oninput="updateProfilePreview()"></div>
+      <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+        <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:12px">Social Links <span class="badge badge-orange" style="margin-left:6px">Pro Only</span></div>
+        <div id="socialLinksForm">
+          <div class="form-group"><label class="form-label">📸 Instagram URL</label><input type="text" id="ep_instagram" class="form-input" placeholder="https://instagram.com/yourhandle" oninput="updateProfilePreview()"></div>
+          <div class="form-group"><label class="form-label">💬 WhatsApp Number</label><input type="text" id="ep_whatsapp" class="form-input" placeholder="94XXXXXXXXX" oninput="updateProfilePreview()"></div>
+          <div class="form-group"><label class="form-label">▶️ YouTube URL</label><input type="text" id="ep_youtube" class="form-input" placeholder="https://youtube.com/@channel"></div>
+          <div class="form-group"><label class="form-label">🅱️ Behance URL</label><input type="text" id="ep_behance" class="form-input" placeholder="https://behance.net/yourname"></div>
+          <div class="form-group"><label class="form-label">🎵 TikTok URL</label><input type="text" id="ep_tiktok" class="form-input" placeholder="https://tiktok.com/@handle"></div>
+          <div class="form-group"><label class="form-label">🌐 Website URL</label><input type="text" id="ep_website" class="form-input" placeholder="https://yoursite.com"></div>
+        </div>
+      </div>
+    </div>
+    <!-- RIGHT: preview -->
+    <div>
+      <div class="profile-preview-card" style="position:sticky;top:20px">
+        <div style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-muted);margin-bottom:16px">Profile Preview</div>
+        <div class="preview-avatar" id="prevAvatar" style="background:#FF5C00">?</div>
+        <div style="font-family:var(--font-display);font-size:16px;font-weight:700;color:var(--text)" id="prevName">Your Name</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:3px" id="prevRole">Your Role</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:8px;line-height:1.6;text-align:left" id="prevBio">Your bio…</div>
+        <div id="prevSkills" style="display:flex;flex-wrap:wrap;gap:4px;justify-content:center;margin:10px 0"></div>
+        <div id="prevTags" style="display:flex;flex-wrap:wrap;gap:4px;justify-content:center;margin-bottom:10px"></div>
+        <div id="prevSocialLinks" style="margin-top:8px"></div>
+      </div>
+    </div>
+  </div>
+  <div style="display:flex;gap:10px;margin-top:24px;justify-content:flex-end">
+    <button class="btn btn-ghost" onclick="closeModal('editprofile')">Cancel</button>
+    <button class="btn btn-primary" onclick="doSaveProfile()">Save Profile</button>
+  </div>
+</div>
+</div>
+
+<!-- UPGRADE -->
+<div class="modal-overlay" id="modal-upgrade">
+<div class="modal" style="max-width:400px;text-align:center">
+  <button class="modal-close" onclick="closeModal('upgrade')">×</button>
+  <div style="font-size:36px;margin-bottom:16px">⭐</div>
+  <div class="modal-title">Upgrade to Pro</div>
+  <div class="modal-sub">Message us on WhatsApp to complete your upgrade via bank transfer.</div>
+  <div style="background:var(--surface2);border-radius:var(--radius);padding:16px;margin:16px 0;text-align:left">
+    <div style="font-size:13px;color:var(--text-muted);margin-bottom:6px">Pro Plan</div>
+    <div style="font-family:var(--font-display);font-size:28px;font-weight:800;color:var(--text)">LKR 2,490 <span style="font-size:14px;font-weight:400;color:var(--text-muted)">/month</span></div>
+    <div style="font-size:12px;color:var(--text-muted);margin-top:4px">or LKR 24,900/year (save 2 months)</div>
+  </div>
+  <a href="https://wa.me/94720191167?text=Hi!%20I%20want%20to%20upgrade%20to%20Creativo%20Pro" target="_blank" class="btn" style="width:100%;justify-content:center;padding:12px;background:#25D366;color:white;border:none;font-size:15px">💬 WhatsApp Us to Upgrade</a>
+  <p style="font-size:12px;color:var(--text-muted);margin-top:12px">Activated within 24 hrs after payment</p>
+</div>
+</div>
+
+<!-- POST JOB -->
+<div class="modal-overlay" id="modal-postjob">
+<div class="modal" style="max-width:500px">
+  <button class="modal-close" onclick="closeModal('postjob')">×</button>
+  <div class="modal-title">Post a Job</div>
+  <div class="modal-sub">Reach Sri Lanka's top creative talent.</div>
+  <div class="form-group"><label class="form-label">Job Title</label><input type="text" id="job_title" class="form-input" placeholder="e.g. Senior Graphic Designer"></div>
+  <div class="form-row">
+    <div class="form-group"><label class="form-label">Category</label>
+      <select id="job_category" class="form-select">
+        <option>Graphic Design</option><option>Video Editing</option>
+        <option>Motion Graphics</option><option>Social Media</option><option>Branding</option>
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Type</label>
+      <select id="job_type" class="form-select">
+        <option>Full-time</option><option>Part-time</option>
+        <option>Freelance</option><option>Remote</option><option>Contract</option>
+      </select>
+    </div>
+  </div>
+  <div class="form-row">
+    <div class="form-group"><label class="form-label">Location</label><input type="text" id="job_location" class="form-input" placeholder="Colombo / Remote"></div>
+    <div class="form-group"><label class="form-label">Salary (LKR/mo)</label><input type="text" id="job_salary" class="form-input" placeholder="e.g. 80,000"></div>
+  </div>
+  <div class="form-group"><label class="form-label">Company Name *</label><input type="text" id="job_company" class="form-input" placeholder="Your company or brand"></div>
+  <div class="form-group"><label class="form-label">Job Description</label><textarea id="job_desc" class="form-textarea" rows="3" placeholder="What will the candidate do? Requirements, responsibilities…"></textarea></div>
+  <div class="form-row">
+    <div class="form-group"><label class="form-label">WhatsApp (optional)</label><input type="text" id="job_wa" class="form-input" placeholder="94XXXXXXXXX"></div>
+    <div class="form-group"><label class="form-label">Email (optional)</label><input type="text" id="job_email" class="form-input" placeholder="hr@company.com"></div>
+  </div>
+  <button class="btn btn-primary" style="width:100%;justify-content:center;padding:12px" onclick="doPostJob()">Post Job</button>
+</div>
+</div>
+
+<!-- JOB DETAIL + APPLY MODAL -->
+<div class="modal-overlay" id="modal-jobdetail">
+<div class="modal" style="max-width:520px">
+  <button class="modal-close" onclick="closeModal('jobdetail')">×</button>
+
+  <!-- Job summary header -->
+  <div style="display:flex;align-items:flex-start;gap:14px;padding:0 0 18px 0;border-bottom:1px solid var(--border);margin-bottom:20px">
+    <div id="jd_icon" style="width:52px;height:52px;border-radius:14px;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:26px;flex-shrink:0">🎨</div>
+    <div style="flex:1;min-width:0">
+      <div id="jd_title" style="font-family:var(--font-display);font-size:18px;font-weight:800;color:var(--text);line-height:1.2;margin-bottom:2px"></div>
+      <div id="jd_company" style="font-size:13px;color:var(--text-muted);margin-bottom:8px"></div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap">
+        <span id="jd_type" class="badge badge-gray" style="font-size:10px"></span>
+        <span id="jd_location" class="badge badge-gray" style="font-size:10px"></span>
+        <span id="jd_category" class="badge badge-purple" style="font-size:10px"></span>
+      </div>
+    </div>
+    <div id="jd_salary" style="font-family:var(--font-display);font-size:17px;font-weight:800;color:var(--orange);white-space:nowrap;flex-shrink:0;padding-top:4px"></div>
+  </div>
+
+  <!-- About the role -->
+  <div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:22px">
+    <div style="font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px">About This Role</div>
+    <div id="jd_desc" style="font-size:13px;color:var(--text);line-height:1.75;white-space:pre-wrap"></div>
+  </div>
+
+  <!-- Apply / Brief section -->
+  <div style="background:var(--surface2);border:1px solid var(--border2);border-radius:14px;padding:20px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px">
+      <div style="width:36px;height:36px;background:var(--orange);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">📨</div>
+      <div>
+        <div style="font-size:15px;font-weight:800;color:var(--text);font-family:var(--font-display)">Send Your Brief</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:1px">Goes straight to the employer's notification panel</div>
+      </div>
+    </div>
+
+    <!-- hidden fields -->
+    <input type="hidden" id="ja_jobTitle">
+    <input type="hidden" id="ja_company">
+    <input type="hidden" id="ja_posterId">
+    <input type="hidden" id="ja_posterName">
+
+    <!-- Name + WA -->
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Your Name *</label>
+        <input type="text" id="ja_name" class="form-input" placeholder="Kasun Perera">
+      </div>
+      <div class="form-group">
+        <label class="form-label">WhatsApp *</label>
+        <input type="text" id="ja_wa" class="form-input" placeholder="+94 7X XXX XXXX">
+      </div>
+    </div>
+
+    <!-- Role + Experience -->
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Your Specialty</label>
+        <select id="ja_role" class="form-select">
+          <option value="">Select…</option>
+          <option>Graphic Designer</option>
+          <option>Video Editor</option>
+          <option>Motion Graphics Artist</option>
+          <option>Brand Designer</option>
+          <option>Illustrator</option>
+          <option>Social Media Designer</option>
+          <option>3D & VFX Artist</option>
+          <option>Cinematographer</option>
+          <option>UI/UX Designer</option>
+          <option>Content Creator</option>
+          <option>Other</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Experience</label>
+        <select id="ja_exp" class="form-select">
+          <option value="">Select…</option>
+          <option>Less than 1 year</option>
+          <option>1 – 2 years</option>
+          <option>3 – 5 years</option>
+          <option>5+ years</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Portfolio link -->
+    <div class="form-group">
+      <label class="form-label">Portfolio / Work Samples (link)</label>
+      <input type="text" id="ja_portfolio" class="form-input" placeholder="https://behance.net/you  or  Drive link">
+    </div>
+
+    <!-- Cover note -->
+    <div class="form-group">
+      <label class="form-label">Cover Note *</label>
+      <textarea id="ja_note" class="form-textarea" rows="4" placeholder="Introduce yourself, why you're the right fit, and your availability…"></textarea>
+    </div>
+
+    <!-- Salary expectation -->
+    <div class="form-group">
+      <label class="form-label">Salary Expectation (LKR/mo)</label>
+      <input type="text" id="ja_salary" class="form-input" placeholder="e.g. 85,000  or  Negotiable">
+    </div>
+
+    <!-- Buttons -->
+    <div style="display:flex;gap:10px;margin-top:6px">
+      <button class="btn btn-primary" style="flex:1;justify-content:center;padding:13px;font-size:14px" onclick="doApplyJob()">
+        🚀 Send Brief
+      </button>
+      <a id="jd_waBtn" href="#" target="_blank" class="btn" style="background:#25D366;color:white;border:none;padding:13px 16px;border-radius:10px;text-decoration:none;display:none;align-items:center;gap:6px;font-size:13px;font-weight:600;flex-shrink:0">💬 WA</a>
+    </div>
+    <div id="jd_emailRow" style="display:none;margin-top:8px">
+      <a id="jd_emailBtn" href="#" class="btn btn-ghost" style="width:100%;justify-content:center;padding:10px;font-size:13px">✉️ Apply via Email Instead</a>
+    </div>
+  </div>
+</div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── NON-MODULE HELPERS ──────────────────────────────────────
+function showPage(name){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById('page-'+name).classList.add('active');
+  window.scrollTo(0,0);
+  if(name==='dashboard'&&window.loadDashboard) window.loadDashboard();
+  if(name==='jobs'&&window.loadJobs) window.loadJobs();
+}
+function setActive(el){
+  document.querySelectorAll('.nav-links a').forEach(a=>a.classList.remove('active'));
+  el.classList.add('active');
+}
+function setTabActive(el,containerId){
+  document.getElementById(containerId).querySelectorAll('.filter-tab').forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+}
+function openModal(name){ document.getElementById('modal-'+name).classList.add('open'); }
+function closeModal(name){ document.getElementById('modal-'+name).classList.remove('open'); }
+document.querySelectorAll('.modal-overlay').forEach(o=>{
+  o.addEventListener('click',e=>{ if(e.target===o) o.classList.remove('open'); });
+});
+function switchTab(tab){
+  document.getElementById('signin-form').style.display=tab==='signin'?'block':'none';
+  document.getElementById('signup-form').style.display=tab==='signup'?'block':'none';
+  document.getElementById('tab-signin').classList.toggle('active',tab==='signin');
+  document.getElementById('tab-signup').classList.toggle('active',tab==='signup');
+}
+function showToast(msg){
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'),3200);
+}
+function filterProjects(cat,el){
+  document.querySelectorAll('#discoverFilters .filter-tab').forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+  if(window.loadPublicProjects) window.loadPublicProjects(cat==='all'?'all':cat);
+}
+
+// ── DASHBOARD TABS ──────────────────────────────────────────
+function switchDashTab(tab, el){
+  document.querySelectorAll('.dash-nav li').forEach(l=>l.classList.remove('active'));
+  el.classList.add('active');
+  document.querySelectorAll('.dash-tab-content').forEach(c=>c.classList.remove('active'));
+  const map={overview:'dashTabOverview',projects:'dashTabProjects',inquiries:'dashTabInquiriesContent',admin:'dashTabAdmin'};
+  if(map[tab]) document.getElementById(map[tab]).classList.add('active');
+  if(tab==='inquiries'&&window.loadDashInquiries) window.loadDashInquiries();
+  if((tab==='projects'||tab==='overview')&&window.loadDashboard) window.loadDashboard();
+  if(tab==='admin') loadAdminPanel();
+}
+
+// ── STATIC JOBS fallback ────────────────────────────────────
+function renderStaticJobsInline(el){
+  const staticJobs=[
+    {title:'Senior Graphic Designer',company:'Leo Burnett Sri Lanka',type:'Full-time',location:'Colombo 03',salary:'120,000',category:'Graphic Design',icon:'🎨',desc:'Create compelling visual identities and campaign materials for top Sri Lankan brands.'},
+    {title:'Video Editor — Social Media',company:'Tuk Tuk Digital',type:'Freelance',location:'Remote',salary:'60,000',category:'Video Editing',icon:'🎬',desc:'Edit Reels, TikToks, and YouTube Shorts for 10+ active brand clients per month.'},
+    {title:'Motion Graphics Artist',company:'Hemas Holdings',type:'Full-time',location:'Colombo 10',salary:'95,000',category:'Motion Design',icon:'✨',desc:'After Effects animations and product launch videos for a leading Sri Lankan conglomerate.'},
+    {title:'Brand Designer',company:'Mintpay',type:'Full-time',location:'Hybrid',salary:'110,000',category:'Branding',icon:'🚀',desc:'Own the visual language of Sri Lanka\'s fastest-growing fintech.'},
+    {title:'UI/UX Designer',company:'IronOne Technologies',type:'Full-time',location:'Colombo 05',salary:'130,000',category:'UI/UX',icon:'📱',desc:'Design intuitive banking interfaces used by millions. Figma-first team.'},
+    {title:'Wedding Videographer',company:'Luminary Films LK',type:'Freelance',location:'Island-wide',salary:'Per project',category:'Videography',icon:'💍',desc:'Cinematic wedding films across Sri Lanka. Travel covered.'},
+  ];
+  el.innerHTML+=staticJobs.map((j,i)=>{
+    const key='inline_'+i;
+    window._jobStore=window._jobStore||{};
+    window._jobStore[key]={...j,description:j.desc};
+    return `<div class="job-card" style="opacity:.85;cursor:pointer" onclick="openJobDetail('${key}')">
+      <div class="job-icon">${j.icon}</div>
+      <div class="job-info">
+        <div class="job-title">${j.title}</div>
+        <div class="job-company" style="margin-bottom:4px">${j.company}</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">${j.desc}</div>
+        <div class="job-tags">
+          <span class="badge badge-gray">${j.type}</span>
+          <span class="badge badge-gray">📍 ${j.location}</span>
+          ${j.category?`<span class="badge badge-purple">${j.category}</span>`:''}
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">
+        <div class="job-salary">${j.salary==='Per project'?'Per project':'LKR '+j.salary}</div>
+        <span style="background:var(--orange);color:white;border-radius:6px;padding:4px 12px;font-size:11px;font-weight:700">Apply →</span>
+      </div>
+    </div>`;}).join('');
+}
+
+function renderStaticJobs(){
+  const staticJobs=[
+    {title:'Senior Graphic Designer',company:'Leo Burnett Sri Lanka',type:'Full-time',location:'Colombo 03',salary:'120,000',category:'Graphic Design',icon:'🎨',desc:'Create compelling visual identities and campaign materials for top Sri Lankan and regional brands.'},
+    {title:'Video Editor — Social Media',company:'Tuk Tuk Digital',type:'Freelance',location:'Remote',salary:'60,000',category:'Video Editing',icon:'🎬',desc:'Edit fast-paced Reels, TikToks, and YouTube Shorts for 10+ active brand clients per month.'},
+    {title:'Motion Graphics Artist',company:'Hemas Holdings',type:'Full-time',location:'Colombo 10',salary:'95,000',category:'Motion Design',icon:'✨',desc:'Produce After Effects animations and product launch videos for a Fortune 500-equivalent local conglomerate.'},
+    {title:'Brand Designer',company:'Mintpay',type:'Full-time',location:'Hybrid — Colombo',salary:'110,000',category:'Branding',icon:'🚀',desc:'Own the visual language of Sri Lanka\'s fastest-growing fintech. Work closely with product and marketing.'},
+    {title:'Wedding Videographer',company:'Luminary Films LK',type:'Freelance',location:'Island-wide',salary:'Per project',category:'Videography',icon:'💍',desc:'Cinematic wedding films shot across Sri Lanka. Premiere Pro & DaVinci Resolve workflow. Travel covered.'},
+    {title:'UI/UX Designer',company:'IronOne Technologies',type:'Full-time',location:'Colombo 05',salary:'130,000',category:'UI/UX',icon:'📱',desc:'Design intuitive digital banking and fintech interfaces used by millions. Figma-first team.'},
+    {title:'Content Creator — Lifestyle',company:'ODEL PLC',type:'Part-time',location:'Colombo / Remote',salary:'45,000',category:'Content Creation',icon:'📸',desc:'Produce photo and video content for ODEL\'s social channels. Must have own camera and editing skills.'},
+    {title:'3D Visualiser',company:'Odel Home & Living',type:'Full-time',location:'Colombo',salary:'85,000',category:'3D Design',icon:'🧊',desc:'Create photorealistic 3D renders of furniture and interiors for e-commerce and print catalogs.'},
+    {title:'YouTube Video Editor',company:'Tech with Malindu',type:'Freelance',location:'Remote',salary:'40,000',category:'Video Editing',icon:'▶️',desc:'Edit weekly tech review videos. Must deliver within 24hrs of raw footage. Long-term collaboration.'},
+    {title:'Packaging Designer',company:'MAS Active',type:'Contract',location:'Biyagama',salary:'90,000',category:'Graphic Design',icon:'📦',desc:'Design export-ready apparel packaging for global clients including Nike and Victoria\'s Secret.'},
+  ];
+  const el=document.getElementById('jobsList');
+  el.innerHTML=`<div style="background:var(--surface2);border:1px dashed var(--border2);border-radius:10px;padding:10px 16px;margin-bottom:16px;font-size:12px;color:var(--text-muted);display:flex;align-items:center;gap:8px">
+    <span style="background:var(--orange);color:white;border-radius:4px;padding:2px 7px;font-size:10px;font-weight:700;letter-spacing:.5px">DEMO</span>
+    Sample job listings — be the first to post a real job!
+    ${CU?`<button onclick="openModal('postjob')" style="margin-left:auto;border:none;background:var(--orange);color:white;border-radius:6px;padding:4px 12px;font-size:11px;font-weight:600;cursor:pointer">+ Post a Job</button>`:''}
+  </div>`+staticJobs.map((j,i)=>{
+    const key = 'static_'+i;
+    window._jobStore = window._jobStore||{};
+    window._jobStore[key] = {...j, description:j.desc};
+    return `<div class="job-card" style="opacity:.85;cursor:pointer" onclick="openJobDetail('${key}')">
+      <div class="job-icon">${j.icon}</div>
+      <div class="job-info">
+        <div class="job-title">${j.title}</div>
+        <div class="job-company" style="margin-bottom:4px">${j.company}</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;line-height:1.5">${j.desc}</div>
+        <div class="job-tags">
+          <span class="badge badge-gray">${j.type}</span>
+          <span class="badge badge-gray">📍 ${j.location}</span>
+          ${j.category?`<span class="badge badge-purple">${j.category}</span>`:''}
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">
+        <div class="job-salary">${j.salary==='Per project'?'Per project':'LKR '+j.salary}</div>
+        <span style="background:var(--orange);color:white;border-radius:6px;padding:4px 12px;font-size:11px;font-weight:700;letter-spacing:.3px">Apply →</span>
+      </div>
+    </div>`;}).join('');
+}
+</script>
+</body>
+</html>
