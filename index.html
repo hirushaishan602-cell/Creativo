@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Creativo · Sri Lanka Creative Portfolio</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
@@ -1555,19 +1555,20 @@ html{scroll-behavior:smooth;}
 }
 .nav-mobile-drawer.open{
   visibility:visible;
-  background:rgba(0,0,0,.6);
-  backdrop-filter:blur(6px);
+  background:rgba(0,0,0,.5);
+  backdrop-filter:blur(4px);
   transition:background .3s ease, visibility 0s linear 0s;
 }
 
 /* Slide panel */
 .nav-mobile-panel{
   background:#111;
-  width:min(320px,90vw);
+  width:100%;
+  max-width:100%;
   height:100%;
   display:flex;
   flex-direction:column;
-  border-left:1px solid var(--border2);
+  border-left:none;
   overflow-y:auto;
   overflow-x:hidden;
   transform:translateX(110%);
@@ -1576,6 +1577,13 @@ html{scroll-behavior:smooth;}
 }
 .nav-mobile-drawer.open .nav-mobile-panel{
   transform:translateX(0);
+}
+
+@media(min-width:500px){
+  .nav-mobile-panel{
+    width:360px;
+    border-left:1px solid var(--border2);
+  }
 }
 
 /* Panel header */
@@ -1620,13 +1628,13 @@ html{scroll-behavior:smooth;}
 
 /* Nav links */
 .nm-links{
-  flex:1;padding:8px 10px;
-  display:flex;flex-direction:column;gap:2px;
+  flex:1;padding:10px 16px;
+  display:flex;flex-direction:column;gap:4px;
 }
 .nm-link{
-  display:flex;align-items:center;gap:12px;
-  padding:13px 14px;border-radius:10px;
-  font-size:15px;font-weight:500;
+  display:flex;align-items:center;gap:14px;
+  padding:16px 16px;border-radius:12px;
+  font-size:16px;font-weight:500;
   color:var(--text-muted);
   cursor:pointer;transition:all .15s;
   text-decoration:none;
@@ -1636,10 +1644,10 @@ html{scroll-behavior:smooth;}
   background:var(--surface2);color:var(--text);
 }
 .nm-link-icon{
-  width:36px;height:36px;border-radius:9px;
+  width:40px;height:40px;border-radius:10px;
   background:var(--surface3);
   display:flex;align-items:center;justify-content:center;
-  font-size:17px;flex-shrink:0;
+  font-size:20px;flex-shrink:0;
 }
 .nm-divider{
   height:1px;background:var(--border);
