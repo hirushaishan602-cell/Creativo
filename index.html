@@ -7,7 +7,6 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 
-<!-- Firebase + Cloudinary — same config as original -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
@@ -28,20 +27,13 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
-let CU = null;   // current firebase user
-let CUD = null;  // current user firestore data
+let CU = null;
+let CUD = null;
 let unsubInquiries = null;
 
-// ── ADMIN CONFIG ────────────────────────────────────────────
-// Admin UIDs - Firebase console eka balala admin users ge UID danna
-const ADMIN_UIDS = [
-              '5Tp9xmfgY4MofJOP88S29RNYTyH3'
-  // Example: 'abc123uid456def789'
-  // Oyage admin account ge UID ekka danna - Firebase Console > Authentication > Users
-];
+const ADMIN_UIDS = ['5Tp9xmfgY4MofJOP88S29RNYTyH3'];
 function isAdmin(){ return CU && ADMIN_UIDS.includes(CU.uid); }
 
-// ── AUTH STATE ──────────────────────────────────────────────
 onAuthStateChanged(auth, async (user) => {
   if (user) {
     CU = user;
@@ -75,7 +67,6 @@ function updateNavLoggedIn(){
   }
   document.getElementById('navMyPortfolio').style.display='inline';
   document.getElementById('navUserName').textContent = CUD?.firstName||'Me';
-  // Admin tab show/hide
   const adminTab = document.getElementById('adminNavTab');
   if(adminTab) adminTab.style.display = isAdmin() ? 'flex' : 'none';
   if(typeof updateMobileNavActions==='function') updateMobileNavActions();
@@ -88,7 +79,6 @@ function updateNavLoggedOut(){
   if(typeof updateMobileNavActions==='function') updateMobileNavActions();
 }
 
-// ── INQUIRY NOTIFICATIONS ───────────────────────────────────
 function subscribeInquiries(){
   if(!CU) return;
   const q = query(collection(db,"inquiries"), where("creativeId","==",CU.uid));
@@ -105,7 +95,6 @@ function subscribeInquiries(){
   });
 }
 
-// ── SIGN UP ─────────────────────────────────────────────────
 window.doSignUp = async function(){
   const fn=v('su_firstName'),ln=v('su_lastName'),em=v('su_email'),role=v('su_role'),pw=v('su_password');
   if(!fn||!em||!pw||role==='Select your specialty'){showToast('⚠️ Please fill all fields');return;}
@@ -129,7 +118,6 @@ window.doSignUp = async function(){
   }
 };
 
-// ── SIGN IN ─────────────────────────────────────────────────
 window.doSignIn = async function(){
   const em=v('si_email'),pw=v('si_password');
   if(!em||!pw){showToast('⚠️ Enter email and password');return;}
@@ -142,10 +130,8 @@ window.doSignIn = async function(){
   }catch(e){showToast('❌ Incorrect email or password.');}
 };
 
-// ── HERO STATS (realtime counts) ────────────────────────────
 window.loadHeroStats = async function(){
   try{
-    // Parallel fetch: users, projects, inquiries
     const [usersSnap, projectsSnap, inquiriesSnap] = await Promise.all([
       getDocs(collection(db,'users')),
       getDocs(collection(db,'projects')),
@@ -153,18 +139,14 @@ window.loadHeroStats = async function(){
     ]);
     const creativeCount  = usersSnap.size;
     const projectCount   = projectsSnap.size;
-    // Unique senders (clients) from inquiries
     const senderSet = new Set();
     inquiriesSnap.docs.forEach(d=>{ const wa=d.data().whatsapp; if(wa) senderSet.add(wa); });
     const clientCount = senderSet.size;
-
-    // Animate counters
     animateCount('statCreatives', creativeCount, '', '+');
     animateCount('statProjects',  projectCount,  '', '+');
     animateCount('statClients',   clientCount,   '', '+');
     animateCount('statHireRate',  94,            '', '%');
   }catch(e){
-    // Fallback to sensible defaults on error
     document.getElementById('statCreatives').textContent='840+';
     document.getElementById('statProjects').textContent='2,300+';
     document.getElementById('statClients').textContent='380+';
@@ -175,9 +157,8 @@ window.loadHeroStats = async function(){
 function animateCount(elId, target, prefix, suffix){
   const el = document.getElementById(elId);
   if(!el) return;
-  const duration = 1600; // ms
+  const duration = 1600;
   const start = performance.now();
-  const startVal = 0;
   function ease(t){ return t<.5?2*t*t:(-1+(4-2*t)*t); }
   function step(now){
     const t = Math.min((now - start) / duration, 1);
@@ -196,7 +177,6 @@ window.doSignOut = async function(){
   showToast('Signed out.');
 };
 
-// ── CLOUDINARY UPLOAD ───────────────────────────────────────
 async function uploadToCloudinary(file){
   const fd=new FormData();
   fd.append('file',file);
@@ -207,7 +187,6 @@ async function uploadToCloudinary(file){
   return (await res.json()).secure_url;
 }
 
-// ── UPLOAD PROJECT ───────────────────────────────────────────
 window.doUpload = async function(){
   if(!CU){showToast('⚠️ Please sign in first');return;}
   const title=v('up_title'),cat=v('up_category'),desc=v('up_desc'),fi=document.getElementById('up_file');
@@ -226,7 +205,6 @@ window.doUpload = async function(){
       coverURL=await uploadToCloudinary(file);
       setUploadZoneLoading(false);
     }
-    // Upload thumbnail separately if provided
     let thumbnailURL='';
     if(window._thumbnailFile){
       showToast('⏳ Uploading thumbnail...');
@@ -298,7 +276,6 @@ window.clearThumbnail = function(e){
   document.getElementById('thumbnailZone').innerHTML = `<div style="font-size:28px;margin-bottom:6px">🎞️</div><div style="font-size:13px;font-weight:500;color:var(--text)">Click to add thumbnail</div><div style="font-size:11px;color:var(--text-muted);margin-top:3px">JPG / PNG · Recommended 1280×720</div>`;
 };
 
-// ── LOAD PUBLIC PROJECTS ────────────────────────────────────
 window.loadPublicProjects = async function(category='all'){
   const grid=document.getElementById('projectGrid');
   grid.innerHTML=skeletonCards(6);
@@ -308,8 +285,6 @@ window.loadPublicProjects = async function(category='all'){
       : query(collection(db,"projects"),where("category","==",category),orderBy("createdAt","desc"));
     const snap=await getDocs(q);
     if(snap.empty){grid.innerHTML=emptyState('🎨','No projects yet','Be the first to upload your work!','Upload Project','openModal(\'upload\')');return;}
-
-    // Fetch unique author user docs for live verified/pro status
     const projects = snap.docs.map(d=>({id:d.id,...d.data()}));
     const uniqueAuthorIds = [...new Set(projects.map(p=>p.authorId).filter(Boolean))];
     const userMap = {};
@@ -319,14 +294,13 @@ window.loadPublicProjects = async function(category='all'){
         if(uSnap.exists()) userMap[uid] = uSnap.data();
       }catch(e){}
     }));
-    // Merge live user status into project data
     projects.forEach(p=>{
       if(p.authorId && userMap[p.authorId]){
-        p.authorVerified = userMap[p.authorId].verified || false;
-        p.authorIsPro    = userMap[p.authorId].isPro    || false;
+        p.authorVerified  = userMap[p.authorId].verified   || false;
+        p.authorIsPro     = userMap[p.authorId].isPro      || false;
+        p.authorTitleBadge= userMap[p.authorId].titleBadge || '';
       }
     });
-
     const bgs=['linear-gradient(135deg,#f093fb,#f5576c)','linear-gradient(135deg,#4facfe,#00f2fe)','linear-gradient(135deg,#43e97b,#38f9d7)','linear-gradient(135deg,#fa709a,#fee140)','linear-gradient(135deg,#a18cd1,#fbc2eb)','linear-gradient(135deg,#667eea,#764ba2)','linear-gradient(135deg,#f7971e,#ffd200)'];
     grid.innerHTML=projects.map((p,i)=>projectCard(p,bgs[i%bgs.length])).join('');
     loadUserLikes();
@@ -344,15 +318,14 @@ function projectCard(p,bg,isOwn){
     ? `<span title="Verified" style="background:#3b82f6;border-radius:50%;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0"><svg viewBox="0 0 24 24" width="8" height="8"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="white"/></svg></span>` : '';
   const proBadge = p.authorIsPro
     ? `<span style="background:var(--orange);color:white;border-radius:3px;padding:1px 5px;font-size:8px;font-weight:700;line-height:1.4">PRO</span>` : '';
-  // Thumbnail / video preview logic
+  const titleBadgeHtml = p.authorTitleBadge
+    ? `<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:100px;font-size:9px;font-weight:700;background:linear-gradient(135deg,#b8860b,#ffd700,#b8860b);color:#1a1000;letter-spacing:0.4px;border:1px solid rgba(255,215,0,0.6);white-space:nowrap">⭐ ${p.authorTitleBadge}</span>` : '';
   const isVideo = p.coverURL && (p.coverURL.includes('/video/') || p.coverURL.match(/\.(mp4|mov|webm)/i));
   let thumbHTML = '';
   if(p.thumbnailURL){
-    // Custom thumbnail — static image always; play-icon overlay for videos
     thumbHTML = `<img src="${p.thumbnailURL}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`;
     if(isVideo) thumbHTML += `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none"><div style="width:46px;height:46px;background:rgba(0,0,0,.65);border-radius:50%;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="20" height="20"><polygon points="8,5 19,12 8,19" fill="white"/></svg></div></div>`;
   } else if(isVideo){
-    // YouTube-style: video element shows first frame; hover plays
     thumbHTML = `<video src="${p.coverURL}" style="width:100%;height:100%;object-fit:cover" muted playsinline preload="metadata"
       onmouseover="this.play();this.nextElementSibling.style.opacity='0'" onmouseout="this.pause();this.currentTime=0;this.nextElementSibling.style.opacity='1'"></video>
       <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;transition:opacity .25s">
@@ -375,7 +348,10 @@ function projectCard(p,bg,isOwn){
       </div>
       <div class="portfolio-creator">
         <div class="avatar" style="${avatarStyle};width:26px;height:26px;font-size:10px">${avatarContent}</div>
-        <div class="creator-name" style="display:flex;align-items:center;gap:4px">${p.authorName||'Creative'} ${verifiedBadge} ${proBadge}</div>
+        <div style="display:flex;flex-direction:column;gap:3px">
+          <div class="creator-name" style="display:flex;align-items:center;gap:4px">${p.authorName||'Creative'} ${verifiedBadge} ${proBadge}</div>
+          ${titleBadgeHtml}
+        </div>
       </div>
       <div class="portfolio-stats">
         <div class="pstat">👁 <strong id="vw_${p.id}">${p.views||0}</strong> views</div>
@@ -392,9 +368,7 @@ function projectCard(p,bg,isOwn){
   </div>`;
 }
 
-// ── LIKE ────────────────────────────────────────────────────
-// ── LIKES (toggle, no duplicates) ──────────────────────────
-const _likedSet = new Set(); // project ids liked this session
+const _likedSet = new Set();
 
 window.likeProject = async function(id, btn){
   if(!CU){ showToast('Sign in karanna like karanna!'); return; }
@@ -402,7 +376,6 @@ window.likeProject = async function(id, btn){
   const alreadyLiked = _likedSet.has(id);
   try{
     if(alreadyLiked){
-      // Unlike
       await deleteDoc(likeDocRef);
       await updateDoc(doc(db,"projects",id),{likes:increment(-1)});
       _likedSet.delete(id);
@@ -410,7 +383,6 @@ window.likeProject = async function(id, btn){
       if(el) el.textContent=Math.max(0,parseInt(el.textContent)-1);
       if(btn){ btn.textContent='🤍'; btn.style.transform='scale(1)'; }
     } else {
-      // Like
       await setDoc(likeDocRef,{userId:CU.uid,projectId:id,createdAt:serverTimestamp()});
       await updateDoc(doc(db,"projects",id),{likes:increment(1)});
       _likedSet.add(id);
@@ -425,13 +397,11 @@ window.likeProject = async function(id, btn){
   }catch(e){ showToast('❌ '+e.message); }
 };
 
-// Load which projects current user has liked
 async function loadUserLikes(){
   if(!CU) return;
   try{
     const snap = await getDocs(query(collection(db,'likes'),where('userId','==',CU.uid)));
     snap.docs.forEach(d=>_likedSet.add(d.data().projectId));
-    // Update heart buttons already on screen
     _likedSet.forEach(id=>{
       const btn = document.getElementById('likeBtn_'+id);
       if(btn) btn.textContent='❤️';
@@ -439,10 +409,9 @@ async function loadUserLikes(){
   }catch(e){}
 }
 
-// ── INCREMENT VIEW on project open ─────────────────────────
 window.incrementView = async function(id){
   const key = 'viewed_'+id;
-  if(sessionStorage.getItem(key)) return; // once per session
+  if(sessionStorage.getItem(key)) return;
   sessionStorage.setItem(key,'1');
   try{
     await updateDoc(doc(db,"projects",id),{views:increment(1)});
@@ -451,7 +420,6 @@ window.incrementView = async function(id){
   }catch(e){}
 };
 
-// ── DELETE PROJECT ──────────────────────────────────────────
 window.deleteProject = async function(id){
   if(!confirm('Delete this project? This cannot be undone.')) return;
   try{
@@ -463,7 +431,6 @@ window.deleteProject = async function(id){
   }catch(e){showToast('❌ '+e.message);}
 };
 
-// ── LOAD CREATIVES ──────────────────────────────────────────
 window.loadPublicCreatives = async function(type='all'){
   const grid=document.getElementById('creativesGrid');
   grid.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text-muted)">Loading creatives...</div>';
@@ -484,7 +451,10 @@ window.loadPublicCreatives = async function(type='all'){
         <div class="profile-name">${c.firstName||''} ${c.lastName||''}</div>
         <div class="profile-role">${c.role||''}</div>
         <div class="profile-location">📍 ${c.location||'Sri Lanka'}</div>
-        <div class="profile-tags">${(c.tags||[]).slice(0,3).map(t=>`<span class="badge badge-gray">${t}</span>`).join('')}</div>
+        <div class="profile-tags">
+          ${c.titleBadge?`<span style="display:inline-flex;align-items:center;padding:3px 12px;border-radius:100px;font-size:11px;font-weight:700;background:linear-gradient(135deg,#b8860b,#ffd700,#b8860b);color:#1a1000;letter-spacing:0.5px;border:1px solid rgba(255,215,0,0.6);box-shadow:0 0 8px rgba(255,215,0,0.25)">⭐ ${c.titleBadge}</span>`:''}
+          ${(c.tags||[]).slice(0,3).map(t=>`<span class="badge badge-gray">${t}</span>`).join('')}
+        </div>
         <div class="profile-stats-row">
           <div class="pst"><div class="pst-num">${c.projectCount||0}</div><div class="pst-label">Projects</div></div>
           <div class="pst"><div class="pst-num">${c.totalLikes||0}</div><div class="pst-label">Likes</div></div>
@@ -495,7 +465,6 @@ window.loadPublicCreatives = async function(type='all'){
   }catch(e){grid.innerHTML='<div style="text-align:center;padding:40px;color:var(--text-muted)">Could not load creatives.</div>';}
 };
 
-// ── VIEW PROFILE ────────────────────────────────────────────
 window.openMyPortfolio = function(){
   if(!CU) return openModal('auth');
   viewFirebaseProfile(CU.uid, null, true);
@@ -503,7 +472,6 @@ window.openMyPortfolio = function(){
 
 window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
   if(!userId) return;
-  // Increment project view when card is clicked
   if(projectId) incrementView(projectId);
   showPage('profile');
   document.getElementById('pvAvatar').innerHTML='⏳';
@@ -520,8 +488,6 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
     const u=snap.data(); const uid=snap.id;
     const selfView=selfOverride||(CU&&CU.uid===uid);
     if(!selfView) updateDoc(doc(db,"users",uid),{profileViews:increment(1)}).catch(()=>{});
-
-    // Banner
     const banner=document.getElementById('pvHeroBanner');
     if(u.bannerURL){
       banner.style.backgroundImage=`url(${u.bannerURL})`;
@@ -533,8 +499,6 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
       banner.style.backgroundSize='';
     }
     document.getElementById('pvHeroBannerEditBtn').style.display=selfView?'block':'none';
-
-    // Avatar
     const pvAv=document.getElementById('pvAvatar');
     const ini=(u.firstName?.[0]||'')+(u.lastName?.[0]||'');
     if(u.avatarURL){
@@ -542,8 +506,6 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
       pvAv.style.background='transparent';
     } else { pvAv.innerHTML=ini||'?'; pvAv.style.background=u.avatarColor||'#6B4EFF'; }
     document.getElementById('pvAvatarEditBtn').style.display=selfView?'flex':'none';
-
-    // Info
     document.getElementById('pvName').textContent=`${u.firstName||''} ${u.lastName||''}`.trim();
     document.getElementById('pvProBadge').style.display=u.isPro?'inline-flex':'none';
     document.getElementById('pvVerifiedBadge').style.display=u.verified?'inline-flex':'none';
@@ -552,10 +514,10 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
     document.getElementById('pvBio').textContent=u.bio||'';
     document.getElementById('pvLocationText').textContent=u.location||'Sri Lanka';
     document.getElementById('pvLocationPill').style.display=u.location?'inline-flex':'none';
-    document.getElementById('pvTags').innerHTML=(u.tags||[]).map(t=>`<span class="badge badge-gray">${t}</span>`).join('');
+    document.getElementById('pvTags').innerHTML=
+      (u.titleBadge ? `<span style="display:inline-flex;align-items:center;padding:4px 14px;border-radius:100px;font-size:11px;font-weight:700;background:linear-gradient(135deg,#b8860b,#ffd700,#b8860b);color:#1a1000;letter-spacing:0.6px;border:1px solid rgba(255,215,0,0.7);box-shadow:0 0 10px rgba(255,215,0,0.3)">⭐ ${u.titleBadge}</span>` : '') +
+      (u.tags||[]).map(t=>`<span class="badge badge-gray">${t}</span>`).join('');
     document.getElementById('pvSkills').innerHTML=(u.skills||[]).map(s=>`<span class="badge badge-purple">${s}</span>`).join('');
-
-    // Social
     const sl=u.socialLinks||{};
     const socEl=document.getElementById('pvSocial');
     socEl.innerHTML='';
@@ -565,8 +527,6 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
     if(sl.behance) socEl.innerHTML+=`<a href="${sl.behance}" target="_blank" class="btn btn-ghost btn-sm">🅱️ Behance</a>`;
     if(sl.tiktok) socEl.innerHTML+=`<a href="${sl.tiktok}" target="_blank" class="btn btn-ghost btn-sm">🎵 TikTok</a>`;
     if(sl.website) socEl.innerHTML+=`<a href="${sl.website}" target="_blank" class="btn btn-ghost btn-sm">🌐 Website</a>`;
-
-    // Action buttons
     const actEl=document.getElementById('pvActionBtns');
     if(selfView){
       actEl.innerHTML=`
@@ -580,8 +540,6 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
         <button class="btn btn-primary" onclick="document.getElementById('hire_creativeId').value='${uid}';document.getElementById('hire_creativeName').value='${((u.firstName||'')+' '+(u.lastName||'')).trim()}';openModal('hire')">💼 Hire Me</button>`;
       document.getElementById('pvUploadBtn').style.display='none';
     }
-
-    // Projects + stats
     const pSnap=await getDocs(query(collection(db,"projects"),where("authorId","==",uid)));
     const pDocs=pSnap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
     const bgs=['linear-gradient(135deg,#f093fb,#f5576c)','linear-gradient(135deg,#4facfe,#00f2fe)','linear-gradient(135deg,#43e97b,#38f9d7)','linear-gradient(135deg,#fa709a,#fee140)','linear-gradient(135deg,#a18cd1,#fbc2eb)','linear-gradient(135deg,#667eea,#764ba2)'];
@@ -597,13 +555,10 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
         ${selfView?`<button class="btn btn-primary" onclick="openModal('upload')" style="margin-top:12px">Upload a project →</button>`:''}
       </div>`;
     } else {
-      // Merge live user verified/pro into projects
       pDocs.forEach(p=>{ p.authorVerified=u.verified||false; p.authorIsPro=u.isPro||false; });
-      // Profile page cards — click opens media viewer, not profile navigation
       const profileCards = pDocs.map((p,i)=>{
         const bg2=bgs[i%bgs.length];
         const isVideo2=p.coverURL&&(p.coverURL.includes('/video/')||p.coverURL.match(/\.(mp4|mov|webm)/i));
-        // thumbnailURL තිබ්බොත් ඒකම show කරනවා (video card වුනත්) — නැත්නම් coverURL
         let thumbInner2='';
         if(p.thumbnailURL){
           thumbInner2=`<img src="${p.thumbnailURL}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`;
@@ -650,17 +605,13 @@ window.copyPortfolioLink = function(uid){
   navigator.clipboard.writeText(url).then(()=>showToast('🔗 Portfolio link copied!')).catch(()=>showToast('Copy failed'));
 };
 
-// ── MEDIA VIEWER (profile page project click) ───────────────
 window.openMediaViewer = function(coverURL, title, description, likes, views){
   const overlay = document.getElementById('mediaViewerOverlay');
   const mediaEl = document.getElementById('mediaViewerContent');
   const titleEl = document.getElementById('mediaViewerTitle');
   const descEl  = document.getElementById('mediaViewerDesc');
   const statsEl = document.getElementById('mediaViewerStats');
-
-  // Determine if video or image
   const isVideo = coverURL && (coverURL.includes('/video/') || coverURL.match(/\.(mp4|mov|webm)/i));
-
   if(isVideo){
     mediaEl.innerHTML=`<video src="${coverURL}" controls autoplay playsinline
       style="max-width:100%;max-height:70vh;border-radius:12px;background:#000;display:block;margin:0 auto"></video>`;
@@ -670,7 +621,6 @@ window.openMediaViewer = function(coverURL, title, description, likes, views){
   } else {
     mediaEl.innerHTML=`<div style="font-size:80px;text-align:center;padding:40px">🎨</div>`;
   }
-
   titleEl.textContent = title || '';
   descEl.textContent  = description || '';
   statsEl.textContent = `👁 ${views||0} views  ·  ❤️ ${likes||0} likes`;
@@ -680,7 +630,6 @@ window.openMediaViewer = function(coverURL, title, description, likes, views){
 window.closeMediaViewer = function(){
   const overlay = document.getElementById('mediaViewerOverlay');
   overlay.classList.remove('open');
-  // Stop any playing video
   const vid = overlay.querySelector('video');
   if(vid){ vid.pause(); vid.src=''; }
 };
@@ -701,7 +650,6 @@ window.handleBannerUpload = async function(input){
   }catch(e){showToast('❌ Upload failed');}
 };
 
-// ── DASHBOARD ───────────────────────────────────────────────
 window.loadDashboard = async function(){
   if(!CU) return;
   const ini=(CUD?.firstName?.[0]||'')+(CUD?.lastName?.[0]||'');
@@ -724,7 +672,6 @@ window.loadDashboard = async function(){
     document.getElementById('dashStatProjects').textContent=myP.length;
     document.getElementById('dashStatProfileViews').textContent=(CUD?.profileViews||0).toLocaleString();
     document.getElementById('dashPlanNote').textContent=CUD?.isPro?'Pro — Unlimited':`${myP.length}/3 Free`;
-    // Overview insight
     const insightEl=document.getElementById('dashOverviewInsight');
     if(myP.length>0){
       const topP=myP.reduce((a,b)=>(b.views||0)>(a.views||0)?b:a,myP[0]);
@@ -733,13 +680,11 @@ window.loadDashboard = async function(){
     } else { insightEl.style.display='none'; }
     document.getElementById('dashOverviewPlan').textContent=CUD?.isPro?'⭐ Pro':'Free Plan';
     const bgs=['linear-gradient(135deg,#f093fb,#f5576c)','linear-gradient(135deg,#4facfe,#00f2fe)','linear-gradient(135deg,#43e97b,#38f9d7)','linear-gradient(135deg,#fa709a,#fee140)','linear-gradient(135deg,#667eea,#764ba2)'];
-    // Overview recent projects list
     const dl=document.getElementById('dashProjects');
     if(myP.length===0){dl.innerHTML=emptyState('📂','No projects yet','Upload your first project — it\'ll appear in Discover for clients to find you.','Upload Project',"openModal('upload')");
     } else {
       dl.innerHTML=myP.slice(0,5).map((p,i)=>projectRowHtml(p,bgs[i%bgs.length])).join('');
     }
-    // Full projects tab with preview cards
     const dFull=document.getElementById('dashProjectsFull');
     if(myP.length===0){dFull.innerHTML=emptyState('📂','No projects yet','Upload your first project.','Upload Project',"openModal('upload')");}
     else{
@@ -788,7 +733,6 @@ function projectPreviewCard(p,bg){
   </div>`;
 }
 
-// ── DASHBOARD INQUIRIES ─────────────────────────────────────
 async function loadDashInquiries(){
   if(!CU) return;
   try{
@@ -826,7 +770,6 @@ window.deleteInquiry = async function(id){
     await deleteDoc(doc(db,"inquiries",id));
     showToast('🗑 Brief deleted');
     loadDashInquiries();
-    // refresh notif panel if open
     const panel=document.getElementById('notifPanel');
     if(panel&&panel.style.display==='block'){
       panel.style.display='none';
@@ -835,7 +778,6 @@ window.deleteInquiry = async function(id){
   }catch(e){showToast('❌ '+e.message);}
 };
 
-// ── HIRE BRIEF ──────────────────────────────────────────────
 window.doHire = async function(){
   const cid=v('hire_creativeId'),cname=v('hire_creativeName');
   const projectTitle=v('hire_title'),projectType=v('hire_type'),budget=v('hire_budget');
@@ -852,7 +794,6 @@ window.doHire = async function(){
   }catch(e){showToast('❌ '+e.message);}
 };
 
-// ── APPLY JOB ───────────────────────────────────────────────
 window.doApplyJob = async function(){
   const name    = (document.getElementById('ja_name')?.value||'').trim();
   const wa      = (document.getElementById('ja_wa')?.value||'').trim();
@@ -865,13 +806,10 @@ window.doApplyJob = async function(){
   const company  = document.getElementById('ja_company').value;
   const posterId = document.getElementById('ja_posterId').value;
   const posterName=document.getElementById('ja_posterName').value;
-
   if(!name)   { showToast('⚠️ Please enter your name'); return; }
   if(!wa)     { showToast('⚠️ Please enter your WhatsApp number'); return; }
   if(!note)   { showToast('⚠️ Please add a cover note'); return; }
   if(!posterId){ showToast('⚠️ Cannot identify employer — only real posted jobs can receive briefs'); return; }
-
-  // Build a rich notes summary
   const richNotes = [
     role     ? `🎨 Specialty: ${role}`        : '',
     exp      ? `📅 Experience: ${exp}`         : '',
@@ -879,25 +817,19 @@ window.doApplyJob = async function(){
     portfolio? `🔗 Portfolio: ${portfolio}`    : '',
     note     ? `\n📝 ${note}`                  : '',
   ].filter(Boolean).join('\n');
-
   const btn = document.querySelector('#modal-jobdetail .btn-primary');
   if(btn){ btn.disabled=true; btn.textContent='Sending…'; }
-
   try{
     await addDoc(collection(db,"inquiries"),{
-      creativeId:   posterId,        // employer receives it
+      creativeId:   posterId,
       creativeName: posterName,
       projectTitle: `📋 Job Application: ${jobTitle}`,
       projectType:  role || 'Creative Role',
       budget:       salaryEx ? `LKR ${salaryEx}` : 'Open to discuss',
-      name,
-      whatsapp: wa,
-      notes: richNotes,
-      jobApplication: true,
-      company,
+      name, whatsapp: wa, notes: richNotes,
+      jobApplication: true, company,
       applicantId: CU ? CU.uid : null,
-      read: false,
-      createdAt: serverTimestamp()
+      read: false, createdAt: serverTimestamp()
     });
     closeModal('jobdetail');
     showToast('✅ Brief sent! The employer will see it in their dashboard.');
@@ -908,7 +840,6 @@ window.doApplyJob = async function(){
   }
 };
 
-// ── EDIT PROFILE ─────────────────────────────────────────────
 window.openEditProfile = function(){
   if(!CU){openModal('auth');return;}
   document.getElementById('ep_firstName').value=CUD?.firstName||'';
@@ -918,6 +849,11 @@ window.openEditProfile = function(){
   document.getElementById('ep_bio').value=CUD?.bio||'';
   document.getElementById('ep_tags').value=(CUD?.tags||[]).join(', ');
   document.getElementById('ep_skills').value=(CUD?.skills||[]).join(', ');
+  // titleBadge - read only, admin only
+  const titleBadgeInput = document.getElementById('ep_titleBadge');
+  if(titleBadgeInput){
+    titleBadgeInput.value = CUD?.titleBadge||'';
+  }
   const sl=CUD?.socialLinks||{};
   document.getElementById('ep_instagram').value=sl.instagram||'';
   document.getElementById('ep_whatsapp').value=sl.whatsapp||'';
@@ -925,7 +861,6 @@ window.openEditProfile = function(){
   document.getElementById('ep_behance').value=sl.behance||'';
   document.getElementById('ep_tiktok').value=sl.tiktok||'';
   document.getElementById('ep_website').value=sl.website||'';
-  // Reset pic upload state
   window._newAvatarURL = null;
   const picPreview = document.getElementById('epAvatarPreview');
   if(picPreview){
@@ -967,15 +902,19 @@ window.updateProfilePreview = function(){
   document.getElementById('prevRole').textContent=`${role} · ${loc}`;
   document.getElementById('prevBio').textContent=bio;
   document.getElementById('prevTags').innerHTML=tags.map(t=>`<span class="badge badge-gray">${t}</span>`).join('');
+  // Show gold title badge in preview if set
+  const titleBadge = CUD?.titleBadge||'';
+  const prevTagsEl = document.getElementById('prevTags');
+  prevTagsEl.innerHTML =
+    (titleBadge ? `<span style="display:inline-flex;align-items:center;padding:4px 14px;border-radius:100px;font-size:11px;font-weight:700;background:linear-gradient(135deg,#b8860b,#ffd700,#b8860b);color:#1a1000;letter-spacing:0.6px;border:1px solid rgba(255,215,0,0.7);box-shadow:0 0 10px rgba(255,215,0,0.3)">⭐ ${titleBadge}</span>` : '') +
+    tags.map(t=>`<span class="badge badge-gray">${t}</span>`).join('');
   document.getElementById('prevSkills').innerHTML=skills.map(s=>`<span class="badge badge-purple">${s}</span>`).join('');
   const isPro=CUD?.isPro;
   const sl_instagram=v('ep_instagram');
   document.getElementById('prevSocialLinks').innerHTML=isPro&&sl_instagram?`<span class="badge badge-orange">📸 Instagram</span>`:(isPro?'':`<span style="font-size:11px;color:var(--orange)">🔒 Social links — Pro only</span>`);
 };
 
-window.triggerAvatarUpload = function(){
-  document.getElementById('ep_avatar_file').click();
-};
+window.triggerAvatarUpload = function(){ document.getElementById('ep_avatar_file').click(); };
 
 window.handleAvatarChange = async function(input){
   const file = input.files[0];
@@ -1011,7 +950,6 @@ window.doSaveProfile = async function(){
   if(window._newAvatarURL) updateData.avatarURL = window._newAvatarURL;
   try{
     await updateDoc(doc(db,"users",CU.uid),updateData);
-    // If avatar changed, update all existing projects with new avatarURL
     if(window._newAvatarURL){
       const pSnap=await getDocs(query(collection(db,"projects"),where("authorId","==",CU.uid)));
       await Promise.all(pSnap.docs.map(d=>updateDoc(d.ref,{authorAvatarURL:window._newAvatarURL})));
@@ -1025,7 +963,6 @@ window.doSaveProfile = async function(){
   }catch(e){showToast('❌ '+e.message);}
 };
 
-// ── JOBS ────────────────────────────────────────────────────
 window.loadJobs = async function(){
   const el=document.getElementById('jobsList');
   el.innerHTML='<div style="text-align:center;padding:20px;color:var(--text-muted);font-size:13px">Loading jobs…</div>';
@@ -1046,7 +983,6 @@ window.loadJobs = async function(){
   }
 };
 
-// ── JOB DATA STORE (avoids JSON-in-onclick issues) ──────────
 window._jobStore = {};
 
 function jobCard(j){
@@ -1077,7 +1013,6 @@ function jobCard(j){
 window.openJobDetail = function(key){
   const j = window._jobStore[key];
   if(!j){ showToast('⚠️ Job data not found'); return; }
-  // Header info
   document.getElementById('jd_icon').textContent = j.icon||'🎨';
   document.getElementById('jd_title').textContent = j.title;
   document.getElementById('jd_company').textContent = j.company;
@@ -1086,12 +1021,10 @@ window.openJobDetail = function(key){
   document.getElementById('jd_location').textContent = '📍 '+(j.location||'Sri Lanka');
   document.getElementById('jd_category').textContent = j.category||'';
   document.getElementById('jd_desc').textContent = j.description||j.desc||'No description provided.';
-  // Hidden fields
   document.getElementById('ja_jobTitle').value = j.title;
   document.getElementById('ja_company').value = j.company;
   document.getElementById('ja_posterId').value = j.postedBy||'';
   document.getElementById('ja_posterName').value = j.postedByName||j.company||'';
-  // Auto-fill if logged in
   if(window.CUD){
     const fullName = ((CUD.firstName||'')+' '+(CUD.lastName||'')).trim();
     document.getElementById('ja_name').value = fullName;
@@ -1107,7 +1040,6 @@ window.openJobDetail = function(key){
   document.getElementById('ja_note').value='';
   document.getElementById('ja_salary').value='';
   document.getElementById('ja_portfolio').value='';
-  // WA / Email contact buttons
   const waBtn = document.getElementById('jd_waBtn');
   const emailRow = document.getElementById('jd_emailRow');
   const emailBtn = document.getElementById('jd_emailBtn');
@@ -1150,19 +1082,17 @@ window.doPostJob = async function(){
   }catch(e){showToast('❌ '+e.message);}
 };
 
-// ── ADMIN FUNCTIONS ──────────────────────────────────────────
 let _allUsers = [];
 
 async function loadAdminPanel(){
   if(!isAdmin()){ showToast('❌ Admin access naha'); return; }
   const el = document.getElementById('adminUsersList');
-  el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--text-muted);font-size:13px">⏳ Users load වෙනවා...</div>';
+  el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--text-muted);font-size:13px">⏳ Loading...</div>';
   try{
     const snap = await getDocs(query(collection(db,'users'), orderBy('createdAt','desc')));
     _allUsers = snap.docs.map(d=>({id:d.id,...d.data()}));
     const searchBox = document.getElementById('adminSearchInput');
     if(searchBox) searchBox.value = '';
-    // Show count
     const countEl = document.getElementById('adminUserCount');
     if(countEl) countEl.textContent = _allUsers.length + ' users';
     renderAdminUsers(_allUsers);
@@ -1175,9 +1105,8 @@ function renderAdminUsers(users){
   const el = document.getElementById('adminUsersList');
   const countEl = document.getElementById('adminUserCount');
   if(countEl) countEl.textContent = users.length + ' / ' + _allUsers.length + ' users';
-
   if(!users || users.length===0){
-    el.innerHTML='<div style="text-align:center;padding:32px;color:var(--text-muted);font-size:13px">🔍 Results nemei</div>';
+    el.innerHTML='<div style="text-align:center;padding:32px;color:var(--text-muted);font-size:13px">🔍 No results</div>';
     return;
   }
   el.innerHTML = users.map(u=>{
@@ -1187,30 +1116,28 @@ function renderAdminUsers(users){
     const isPro = !!u.isPro;
     return `<div style="background:var(--surface2);border:1px solid ${isVer?'rgba(59,130,246,0.35)':isPro?'rgba(255,92,0,0.25)':'var(--border)'};border-radius:12px;padding:14px 16px">
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-        <!-- Avatar -->
         <div style="width:44px;height:44px;border-radius:50%;background:${u.avatarColor||'#6B4EFF'};display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:white;flex-shrink:0;overflow:hidden;border:2px solid ${isVer?'#3b82f6':isPro?'var(--orange)':'transparent'}">
           ${u.avatarURL?`<img src="${u.avatarURL}" style="width:100%;height:100%;object-fit:cover">`:ini||'?'}
         </div>
-        <!-- Info -->
         <div style="flex:1;min-width:140px">
           <div style="font-size:14px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:6px;flex-wrap:wrap">
             ${name}
-            ${isVer?'<span style="background:#3b82f6;border-radius:50%;width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0"><svg viewBox="0 0 24 24" width="9" height="9"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="white"/></svg></span>':''}
+            ${isVer?'<span style="background:#3b82f6;border-radius:50%;width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="9" height="9"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="white"/></svg></span>':''}
             ${isPro?'<span style="background:var(--orange);color:white;border-radius:4px;padding:1px 6px;font-size:9px;font-weight:700">PRO</span>':''}
           </div>
           <div style="font-size:12px;color:var(--text-muted);margin-top:3px">${u.email||'—'}</div>
           <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${u.role||'—'} · 📁 ${u.projectCount||0} projects · 👁 ${u.profileViews||0} views</div>
         </div>
-        <!-- Action buttons -->
         <div style="display:flex;gap:6px;flex-wrap:wrap;flex-shrink:0">
           ${isVer
-            ? `<button onclick="adminToggleVerified('${u.id}',false)" style="background:rgba(239,68,68,0.15);color:#f87171;border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap">✕ Badge ගනිමු</button>`
-            : `<button onclick="adminToggleVerified('${u.id}',true)"  style="background:rgba(59,130,246,0.15);color:#60a5fa;border:1px solid rgba(59,130,246,0.3);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap">✓ Verified දෙමු</button>`
+            ? `<button onclick="adminToggleVerified('${u.id}',false)" style="background:rgba(239,68,68,0.15);color:#f87171;border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">✕ Remove Badge</button>`
+            : `<button onclick="adminToggleVerified('${u.id}',true)"  style="background:rgba(59,130,246,0.15);color:#60a5fa;border:1px solid rgba(59,130,246,0.3);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">✓ Verify</button>`
           }
           ${isPro
-            ? `<button onclick="adminTogglePro('${u.id}',false)" style="background:rgba(239,68,68,0.12);color:#f87171;border:1px solid rgba(239,68,68,0.25);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap">✕ Pro ගනිමු</button>`
-            : `<button onclick="adminTogglePro('${u.id}',true)"  style="background:rgba(255,92,0,0.15);color:var(--orange);border:1px solid rgba(255,92,0,0.3);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap">⭐ Pro දෙමු</button>`
+            ? `<button onclick="adminTogglePro('${u.id}',false)" style="background:rgba(239,68,68,0.12);color:#f87171;border:1px solid rgba(239,68,68,0.25);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">✕ Remove Pro</button>`
+            : `<button onclick="adminTogglePro('${u.id}',true)"  style="background:rgba(255,92,0,0.15);color:var(--orange);border:1px solid rgba(255,92,0,0.3);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">⭐ Give Pro</button>`
           }
+          <button onclick="adminSetTitleBadge('${u.id}','${(u.titleBadge||'').replace(/'/g,"\\'")}','${name.replace(/'/g,"\\'")}')" style="background:linear-gradient(135deg,rgba(184,134,11,0.2),rgba(255,215,0,0.15));color:#ffd700;border:1px solid rgba(255,215,0,0.4);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">🏅 ${u.titleBadge?`"${u.titleBadge}"`:' Title Badge'}</button>
         </div>
       </div>
     </div>`;
@@ -1218,11 +1145,7 @@ function renderAdminUsers(users){
 }
 
 window.adminSearchUsers = function(searchVal){
-  if(!_allUsers || _allUsers.length === 0){
-    // Data load නෑ — reload
-    loadAdminPanel();
-    return;
-  }
+  if(!_allUsers || _allUsers.length === 0){ loadAdminPanel(); return; }
   const q = (searchVal||'').toLowerCase().trim();
   if(!q){ renderAdminUsers(_allUsers); return; }
   const filtered = _allUsers.filter(u=>
@@ -1237,13 +1160,12 @@ window.adminToggleVerified = async function(uid, give){
   if(!isAdmin()){ showToast('❌ Admin access naha'); return; }
   try{
     await updateDoc(doc(db,'users',uid), {verified: give});
-    // Update all projects by this user
     const pSnap = await getDocs(query(collection(db,'projects'),where('authorId','==',uid)));
     await Promise.all(pSnap.docs.map(d=>updateDoc(d.ref,{authorVerified: give})));
     const idx = _allUsers.findIndex(u=>u.id===uid);
     if(idx>-1) _allUsers[idx].verified = give;
     window.adminSearchUsers(document.getElementById('adminSearchInput')?.value||'');
-    showToast(give ? '✅ Verified badge දුන්නා!' : '🗑 Badge ගත්තා!');
+    showToast(give ? '✅ Verified!' : '🗑 Badge removed');
   }catch(e){ showToast('❌ '+e.message); }
 };
 
@@ -1251,17 +1173,29 @@ window.adminTogglePro = async function(uid, give){
   if(!isAdmin()){ showToast('❌ Admin access naha'); return; }
   try{
     await updateDoc(doc(db,'users',uid), {isPro: give});
-    // Update all projects by this user
     const pSnap = await getDocs(query(collection(db,'projects'),where('authorId','==',uid)));
     await Promise.all(pSnap.docs.map(d=>updateDoc(d.ref,{authorIsPro: give})));
     const idx = _allUsers.findIndex(u=>u.id===uid);
     if(idx>-1) _allUsers[idx].isPro = give;
     window.adminSearchUsers(document.getElementById('adminSearchInput')?.value||'');
-    showToast(give ? '⭐ Pro plan දුන්නා!' : '🗑 Pro ගත්තා!');
+    showToast(give ? '⭐ Pro granted!' : '🗑 Pro removed');
   }catch(e){ showToast('❌ '+e.message); }
 };
 
-// ── HELPERS ─────────────────────────────────────────────────
+window.adminSetTitleBadge = async function(uid, currentBadge, userName){
+  if(!isAdmin()){ showToast('❌ Admin access naha'); return; }
+  const input = prompt(`"${userName}" ge Title Badge set karanna:\n(e.g. Founder, CEO, Director)\n\nDaaanna hodath badge remove karanna blank karala OK karanna.`, currentBadge||'');
+  if(input === null) return; // cancelled
+  const badge = input.trim();
+  try{
+    await updateDoc(doc(db,'users',uid), {titleBadge: badge||''});
+    const idx = _allUsers.findIndex(u=>u.id===uid);
+    if(idx>-1) _allUsers[idx].titleBadge = badge;
+    window.adminSearchUsers(document.getElementById('adminSearchInput')?.value||'');
+    showToast(badge ? `🏅 Title badge set: "${badge}"` : '🗑 Title badge removed');
+  }catch(e){ showToast('❌ '+e.message); }
+};
+
 function v(id){return (document.getElementById(id)?.value||'').trim();}
 
 function skeletonCards(n){
@@ -1281,7 +1215,6 @@ function emptyState(icon,title,sub,btnText,btnAction){
   </div>`;
 }
 
-// ── INIT ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded',()=>{
   loadPublicProjects();
   initUploadZone();
@@ -1310,7 +1243,6 @@ function previewFile(file){
   }
 }
 
-// ── NOTIFICATION PANEL ───────────────────────────────────────
 window.toggleNotifPanel=async function(){
   const panel=document.getElementById('notifPanel');
   if(panel.style.display==='block'){panel.style.display='none';return;}
@@ -1522,10 +1454,6 @@ nav{position:sticky;top:0;z-index:200;background:rgba(13,13,13,.92);backdrop-fil
 .modal-tab.active{color:var(--orange);border-bottom-color:var(--orange);}
 .upload-zone{border:2px dashed var(--border2);border-radius:var(--radius);padding:32px;text-align:center;cursor:pointer;transition:all .2s;background:var(--bg2);}
 .upload-zone:hover{border-color:var(--orange);background:var(--orange-pale);}
-.pro-lock{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 16px;display:flex;align-items:center;gap:10px;margin-top:8px;}
-.pro-lock-icon{font-size:20px;}
-.pro-lock-text{font-size:13px;color:var(--text-muted);}
-.pro-lock-text strong{color:var(--orange);}
 
 /* DASHBOARD */
 .dashboard{max-width:1200px;margin:0 auto;padding:40px 2rem;}
@@ -1557,13 +1485,12 @@ nav{position:sticky;top:0;z-index:200;background:rgba(13,13,13,.92);backdrop-fil
 .profile-page{max-width:1000px;margin:0 auto;padding:40px 2rem;}
 .profile-hero{display:flex;gap:32px;align-items:flex-start;margin-bottom:40px;}
 #page-profile{padding:0;}
-@media(max-width:640px){#pvHeroBanner{height:180px!important;}}
 .profile-hero-avatar{width:96px;height:96px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:36px;font-weight:800;color:white;flex-shrink:0;overflow:hidden;background-size:cover;background-position:center;}
 .profile-hero-name{font-family:var(--font-display);font-size:28px;font-weight:800;color:var(--text);display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
 .profile-hero-role{font-size:16px;color:var(--text-muted);margin-top:4px;}
 .profile-hero-bio{font-size:14px;color:var(--text-muted);margin-top:12px;line-height:1.7;max-width:600px;}
 
-/* EDIT PROFILE MODAL — big */
+/* EDIT PROFILE MODAL */
 #modal-editprofile .modal{max-width:680px;}
 .ep-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;}
 .profile-preview-card{background:var(--bg2);border:1px solid var(--border2);border-radius:16px;padding:20px;text-align:center;position:sticky;top:0;}
@@ -1587,42 +1514,165 @@ footer{border-top:1px solid var(--border);background:var(--bg2);margin-top:60px;
 .toast.show{transform:translateY(0);opacity:1;}
 html{scroll-behavior:smooth;}
 
-/* ── HAMBURGER BUTTON ─────────────────────────── */
-.nav-hamburger{display:none;flex-direction:column;justify-content:center;gap:5px;width:38px;height:38px;cursor:pointer;border:none;background:var(--surface);border-radius:8px;padding:8px;border:1px solid var(--border2);}
-.nav-hamburger span{display:block;width:100%;height:2px;background:var(--text);border-radius:2px;transition:all .25s;}
-.nav-hamburger.open span:nth-child(1){transform:translateY(7px) rotate(45deg);}
-.nav-hamburger.open span:nth-child(2){opacity:0;}
-.nav-hamburger.open span:nth-child(3){transform:translateY(-7px) rotate(-45deg);}
+/* ══════════════════════════════════════════════
+   HAMBURGER — mobile only
+═══════════════════════════════════════════════ */
+.nav-hamburger{
+  display:none;
+  flex-direction:column;
+  justify-content:center;
+  gap:5px;
+  width:38px;height:38px;
+  cursor:pointer;
+  border:1px solid var(--border2);
+  background:var(--surface);
+  border-radius:9px;
+  padding:9px;
+  transition:background .2s;
+  flex-shrink:0;
+}
+.nav-hamburger span{
+  display:block;width:100%;height:2px;
+  background:var(--text);border-radius:2px;
+  transition:all .28s cubic-bezier(.4,0,.2,1);
+}
+.nav-hamburger.open{ background:var(--surface2); }
+.nav-hamburger.open span:nth-child(1){ transform:translateY(7px) rotate(45deg); }
+.nav-hamburger.open span:nth-child(2){ opacity:0; transform:scaleX(0); }
+.nav-hamburger.open span:nth-child(3){ transform:translateY(-7px) rotate(-45deg); }
 
-/* Mobile drawer */
-.nav-mobile-drawer{display:none;position:fixed;inset:0;z-index:199;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);}
-.nav-mobile-drawer.open{display:flex;align-items:flex-start;justify-content:flex-end;}
-.nav-mobile-panel{background:var(--surface);width:min(320px,85vw);height:100%;padding:80px 24px 40px;display:flex;flex-direction:column;gap:4px;border-left:1px solid var(--border2);overflow-y:auto;}
-.nav-mobile-panel a{display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:12px;font-size:15px;font-weight:600;color:var(--text-muted);cursor:pointer;text-decoration:none;transition:all .15s;}
-.nav-mobile-panel a:hover,.nav-mobile-panel a.active{background:var(--surface2);color:var(--text);}
-.nav-mobile-panel .nav-mobile-divider{height:1px;background:var(--border);margin:12px 0;}
-.nav-mobile-panel .nav-mobile-actions{display:flex;flex-direction:column;gap:10px;margin-top:8px;}
+/* ══════════════════════════════════════════════
+   MOBILE DRAWER — Timeliners style
+═══════════════════════════════════════════════ */
+.nav-mobile-drawer{
+  position:fixed;inset:0;z-index:300;
+  background:rgba(0,0,0,0);
+  display:flex;
+  align-items:stretch;
+  justify-content:flex-end;
+  visibility:hidden;
+  transition:background .3s ease, visibility 0s linear .35s;
+}
+.nav-mobile-drawer.open{
+  visibility:visible;
+  background:rgba(0,0,0,.6);
+  backdrop-filter:blur(6px);
+  transition:background .3s ease, visibility 0s linear 0s;
+}
 
+/* Slide panel */
+.nav-mobile-panel{
+  background:#111;
+  width:min(320px,90vw);
+  height:100%;
+  display:flex;
+  flex-direction:column;
+  border-left:1px solid var(--border2);
+  overflow-y:auto;
+  overflow-x:hidden;
+  transform:translateX(110%);
+  transition:transform .32s cubic-bezier(.4,0,.2,1);
+  will-change:transform;
+}
+.nav-mobile-drawer.open .nav-mobile-panel{
+  transform:translateX(0);
+}
+
+/* Panel header */
+.nm-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:18px 20px 14px;
+  border-bottom:1px solid var(--border);
+  flex-shrink:0;
+}
+.nm-logo{
+  font-family:var(--font-display);font-size:18px;font-weight:800;
+  color:var(--text);letter-spacing:-.5px;
+}
+.nm-logo span{ color:var(--orange); }
+.nm-close{
+  width:32px;height:32px;
+  border:1px solid var(--border2);border-radius:50%;
+  background:var(--surface2);color:var(--text-muted);
+  font-size:15px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  transition:all .15s;
+}
+.nm-close:hover{ background:var(--surface3);color:var(--text); }
+
+/* User pill (logged-in) */
+.nm-user{
+  margin:14px 16px 0;
+  background:var(--surface2);
+  border:1px solid var(--border2);
+  border-radius:12px;
+  padding:12px 14px;
+  display:flex;align-items:center;gap:12px;
+  cursor:pointer;transition:background .15s;
+}
+.nm-user:hover{ background:var(--surface3); }
+.nm-user-info{ flex:1;min-width:0; }
+.nm-user-name{
+  font-size:13px;font-weight:700;color:var(--text);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.nm-user-plan{ font-size:11px;color:var(--text-muted);margin-top:2px; }
+
+/* Nav links */
+.nm-links{
+  flex:1;padding:8px 10px;
+  display:flex;flex-direction:column;gap:2px;
+}
+.nm-link{
+  display:flex;align-items:center;gap:12px;
+  padding:13px 14px;border-radius:10px;
+  font-size:15px;font-weight:500;
+  color:var(--text-muted);
+  cursor:pointer;transition:all .15s;
+  text-decoration:none;
+  border:none;background:none;width:100%;text-align:left;
+}
+.nm-link:hover,.nm-link.active{
+  background:var(--surface2);color:var(--text);
+}
+.nm-link-icon{
+  width:36px;height:36px;border-radius:9px;
+  background:var(--surface3);
+  display:flex;align-items:center;justify-content:center;
+  font-size:17px;flex-shrink:0;
+}
+.nm-divider{
+  height:1px;background:var(--border);
+  margin:8px 12px;
+}
+
+/* Bottom auth buttons */
+.nm-auth{
+  padding:14px 16px 24px;
+  display:flex;flex-direction:column;gap:8px;
+  flex-shrink:0;
+  border-top:1px solid var(--border);
+}
+
+/* ══════════════════════════════════════════════
+   RESPONSIVE BREAKPOINTS
+═══════════════════════════════════════════════ */
 @media(max-width:768px){
-  /* NAV */
   .nav-hamburger{display:flex;}
   .nav-links{display:none;}
   #navSignIn,#navJoin{display:none!important;}
   nav{padding:0 1rem;}
 
-  /* HERO */
   .hero{grid-template-columns:1fr;padding:40px 1rem 32px;gap:24px;}
   .hero h1{font-size:32px;letter-spacing:-1px;}
   .hero p{font-size:14px;margin-bottom:24px;}
   .hero-cards-stack{display:none;}
   .hero>div:last-child{display:none;}
 
-  /* STATS */
   .stats-inner{gap:20px;}
   .stat-num{font-size:22px;}
   .stats-bar{padding:16px 1rem;}
 
-  /* SECTION */
   .section{padding:32px 1rem;}
   .section-header{flex-direction:column;align-items:flex-start;gap:14px;margin-bottom:20px;}
   .section-title{font-size:22px;}
@@ -1630,7 +1680,6 @@ html{scroll-behavior:smooth;}
   .filter-tabs::-webkit-scrollbar{display:none;}
   .filter-tab{white-space:nowrap;flex-shrink:0;padding:6px 14px;font-size:12px;}
 
-  /* GRIDS */
   .portfolio-grid{grid-template-columns:1fr 1fr;gap:12px;}
   .portfolio-thumb{height:160px;}
   .portfolio-info{padding:10px;}
@@ -1640,15 +1689,12 @@ html{scroll-behavior:smooth;}
   .profile-card{padding:16px 12px;}
   .profile-avatar-big{width:48px;height:48px;font-size:18px;}
 
-  /* PRICING */
   .pricing-grid{grid-template-columns:1fr;}
 
-  /* JOBS */
   .job-card{flex-wrap:wrap;gap:12px;padding:14px;}
   .job-info{min-width:0;flex:1 1 100%;}
   .job-icon{width:40px;height:40px;font-size:18px;}
 
-  /* DASHBOARD */
   .dashboard{padding:20px 1rem;}
   .dash-grid{grid-template-columns:1fr;}
   .dash-sidebar{position:static;padding:0;}
@@ -1658,29 +1704,23 @@ html{scroll-behavior:smooth;}
   .dash-stats-row{grid-template-columns:1fr 1fr;gap:10px;}
   .dash-stat-val{font-size:20px;}
 
-  /* PROFILE PAGE */
   .profile-page{padding:20px 1rem;}
   .profile-hero{flex-direction:column;gap:16px;margin-bottom:24px;}
   .profile-hero-avatar{width:72px;height:72px;font-size:28px;}
   .profile-hero-name{font-size:20px;}
   .profile-hero-role{font-size:14px;}
+  @media(max-width:640px){#pvHeroBanner{height:180px!important;}}
 
-  /* FOOTER */
   .footer-inner{grid-template-columns:1fr;gap:24px;padding:32px 1rem 24px;}
   .footer-bottom{flex-direction:column;gap:8px;text-align:center;}
 
-  /* MODALS */
   .modal{padding:24px 20px;border-radius:16px;}
   .modal-title{font-size:18px;}
   .form-row{grid-template-columns:1fr;}
   .ep-grid{grid-template-columns:1fr;}
   #modal-editprofile .modal{max-width:100%;}
 
-  /* TOAST */
   .toast{bottom:16px;right:16px;left:16px;text-align:center;}
-
-  /* MEDIA VIEWER */
-  #mediaViewerOverlay > div{padding:16px;}
 }
 
 @media(max-width:480px){
@@ -1720,7 +1760,7 @@ html{scroll-behavior:smooth;}
     </div>
     <button class="btn btn-ghost" id="navSignOut" style="display:none" onclick="doSignOut()">Sign Out</button>
   </div>
-  <!-- Hamburger — mobile only -->
+  <!-- Hamburger -->
   <button class="nav-hamburger" id="navHamburger" onclick="toggleMobileNav()" aria-label="Menu">
     <span></span><span></span><span></span>
   </button>
@@ -1729,15 +1769,40 @@ html{scroll-behavior:smooth;}
 <!-- MOBILE DRAWER -->
 <div class="nav-mobile-drawer" id="mobileDrawer" onclick="if(event.target===this)closeMobileNav()">
   <div class="nav-mobile-panel">
-    <a onclick="showPage('discover');setActive(document.querySelector('.nav-links a'));closeMobileNav()">🔍 Discover</a>
-    <a onclick="showPage('creatives');loadPublicCreatives();closeMobileNav()">👥 Creatives</a>
-    <a onclick="showPage('jobs');loadJobs();closeMobileNav()">💼 Jobs</a>
-    <a onclick="showPage('pricing');closeMobileNav()">💎 Pricing</a>
-    <div class="nav-mobile-divider"></div>
-    <div class="nav-mobile-actions" id="mobileNavActions">
-      <button class="btn btn-primary" style="width:100%;justify-content:center" onclick="openModal('auth');closeMobileNav()">Join Free</button>
-      <button class="btn btn-ghost" style="width:100%;justify-content:center" onclick="openModal('auth');closeMobileNav()">Sign In</button>
+
+    <!-- Header -->
+    <div class="nm-header">
+      <div class="nm-logo">Creativo<span>.</span></div>
+      <button class="nm-close" onclick="closeMobileNav()">✕</button>
     </div>
+
+    <!-- User pill — injected by JS -->
+    <div id="nmUserPill"></div>
+
+    <!-- Nav links -->
+    <div class="nm-links" id="nmLinks">
+      <button class="nm-link active" onclick="showPage('discover');closeMobileNav()">
+        <div class="nm-link-icon">🔍</div> Discover
+      </button>
+      <button class="nm-link" onclick="showPage('creatives');loadPublicCreatives();closeMobileNav()">
+        <div class="nm-link-icon">👥</div> Creatives
+      </button>
+      <button class="nm-link" onclick="showPage('jobs');loadJobs();closeMobileNav()">
+        <div class="nm-link-icon">💼</div> Jobs
+      </button>
+      <button class="nm-link" onclick="showPage('pricing');closeMobileNav()">
+        <div class="nm-link-icon">💎</div> Pricing
+      </button>
+      <!-- Auth-only links injected below -->
+      <div id="nmAuthLinks"></div>
+    </div>
+
+    <!-- Bottom auth buttons -->
+    <div class="nm-auth" id="nmAuthBtns">
+      <button class="btn btn-primary" style="justify-content:center" onclick="openModal('auth');closeMobileNav()">Join Free</button>
+      <button class="btn btn-ghost" style="justify-content:center" onclick="openModal('auth');closeMobileNav()">Sign In</button>
+    </div>
+
   </div>
 </div>
 
@@ -1851,12 +1916,12 @@ html{scroll-behavior:smooth;}
 <!-- DASHBOARD -->
 <div class="page" id="page-dashboard">
   <div class="dashboard">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:32px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:32px;flex-wrap:wrap;gap:12px">
       <div>
         <div style="font-family:var(--font-display);font-size:24px;font-weight:800;color:var(--text)">My Dashboard</div>
         <div style="font-size:13px;color:var(--text-muted);margin-top:4px" id="dashPlanLabel">Free Plan</div>
       </div>
-      <div style="display:flex;gap:10px">
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
         <button class="btn btn-ghost" onclick="openEditProfile()">✏️ Edit Profile</button>
         <button class="btn btn-primary" onclick="openModal('upload')">+ Upload Project</button>
       </div>
@@ -1873,7 +1938,7 @@ html{scroll-behavior:smooth;}
         <ul class="dash-nav">
           <li class="active" onclick="switchDashTab('overview',this)">📊 Overview</li>
           <li onclick="switchDashTab('projects',this)">🖼️ My Projects</li>
-          <li onclick="switchDashTab('inquiries',this)" id="dashTabInquiries">📬 Briefs <span id="dashInqBadge" style="display:none;background:var(--orange);color:white;border-radius:100px;padding:1px 7px;font-size:10px;font-weight:700"></span></li>
+          <li onclick="switchDashTab('inquiries',this)" id="dashTabInquiries">📬 Briefs</li>
           <li onclick="openMyPortfolio()">🌐 My Portfolio</li>
           <li onclick="openEditProfile()">👤 Edit Profile</li>
           <li onclick="openModal('upload')">⬆️ Upload Project</li>
@@ -1889,14 +1954,12 @@ html{scroll-behavior:smooth;}
           <div class="dash-stat"><div class="dash-stat-val" id="dashStatProjects">0</div><div class="dash-stat-label">Live Projects</div><div class="dash-stat-note" id="dashPlanNote">0/3 Free</div></div>
           <div class="dash-stat"><div class="dash-stat-val" id="dashStatProfileViews">0</div><div class="dash-stat-label">Profile Views</div></div>
         </div>
-        <!-- Tab contents -->
         <div id="dashTabOverview" class="dash-tab-content active">
           <div class="dash-card">
             <div class="dash-card-header">
               <span class="dash-card-title">📊 Overview</span>
               <span id="dashOverviewPlan" style="font-size:11px;color:var(--text-muted)"></span>
             </div>
-            <!-- Quick insight row -->
             <div id="dashOverviewInsight" style="background:var(--surface2);border-radius:10px;padding:14px 16px;margin-bottom:16px;font-size:13px;color:var(--text-muted);line-height:1.6;display:none"></div>
             <div class="dash-card-header" style="margin-top:4px"><span class="dash-card-title" style="font-size:14px">Recent Projects</span><button class="btn btn-ghost btn-sm" onclick="openModal('upload')">+ Add</button></div>
             <div id="dashProjects"></div>
@@ -1917,7 +1980,7 @@ html{scroll-behavior:smooth;}
         <div id="dashTabAdmin" class="dash-tab-content">
           <div class="dash-card">
             <div class="dash-card-header">
-              <span class="dash-card-title">🛡️ Admin Panel — Users</span>
+              <span class="dash-card-title">🛡️ Admin Panel</span>
               <span id="adminUserCount" style="font-size:11px;color:var(--text-muted);background:var(--surface3);padding:3px 10px;border-radius:100px"></span>
             </div>
             <div style="background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.3);border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:#f59e0b">
@@ -1937,7 +2000,6 @@ html{scroll-behavior:smooth;}
 
 <!-- PROFILE PAGE -->
 <div class="page" id="page-profile">
-  <!-- Hero banner -->
   <div id="pvHeroBanner" style="width:100%;height:260px;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%);position:relative;overflow:hidden">
     <div id="pvHeroBannerOverlay" style="position:absolute;inset:0;background:rgba(0,0,0,.35)"></div>
     <div id="pvHeroBannerEditBtn" style="display:none;position:absolute;top:16px;right:16px">
@@ -1945,20 +2007,16 @@ html{scroll-behavior:smooth;}
       <input type="file" id="bannerFileInput" accept="image/*" style="display:none" onchange="handleBannerUpload(this)">
     </div>
   </div>
-
-  <!-- Profile card -->
   <div style="max-width:860px;margin:0 auto;padding:0 20px">
     <div style="position:relative;margin-top:-60px;margin-bottom:28px">
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:28px 32px 24px">
-        <!-- Top row: avatar + actions -->
         <div style="display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:16px;margin-bottom:20px">
           <div style="position:relative">
             <div id="pvAvatar" class="profile-hero-avatar" style="background:#6B4EFF;width:88px;height:88px;font-size:32px;border:4px solid var(--surface)">?</div>
-            <div id="pvAvatarEditBtn" style="display:none;position:absolute;bottom:0;right:0;background:var(--orange);border-radius:50%;width:26px;height:26px;display:none;align-items:center;justify-content:center;cursor:pointer;font-size:13px" onclick="openEditProfile()" title="Edit profile">✏️</div>
+            <div id="pvAvatarEditBtn" style="display:none;position:absolute;bottom:0;right:0;background:var(--orange);border-radius:50%;width:26px;height:26px;align-items:center;justify-content:center;cursor:pointer;font-size:13px" onclick="openEditProfile()" title="Edit profile">✏️</div>
           </div>
           <div id="pvActionBtns" style="display:flex;gap:10px;flex-wrap:wrap"></div>
         </div>
-        <!-- Name / role / username -->
         <div style="margin-bottom:16px">
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px">
             <div class="profile-hero-name" id="pvName" style="font-size:26px">—</div>
@@ -1968,18 +2026,13 @@ html{scroll-behavior:smooth;}
           <div class="profile-hero-role" id="pvRole" style="font-size:14px;margin-bottom:6px">—</div>
           <div id="pvUsername" style="font-size:12px;color:var(--text-muted)"></div>
         </div>
-        <!-- Bio -->
         <div class="profile-hero-bio" id="pvBio" style="margin-bottom:14px"></div>
-        <!-- Location pill -->
         <div id="pvLocationPill" style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border-radius:100px;padding:5px 14px;font-size:12px;color:var(--text-muted);margin-bottom:16px">
           📍 <span id="pvLocationText">Sri Lanka</span>
         </div>
-        <!-- Tags & skills -->
         <div id="pvTags" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
         <div id="pvSkills" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px"></div>
-        <!-- Social links -->
         <div id="pvSocial" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px"></div>
-        <!-- Stats row -->
         <div style="display:flex;border-top:1px solid var(--border);padding-top:16px;gap:0">
           <div style="flex:1;text-align:center;padding:4px 0">
             <div style="font-family:var(--font-display);font-size:22px;font-weight:800;color:var(--text)" id="pvStatProjects">0</div>
@@ -1998,8 +2051,6 @@ html{scroll-behavior:smooth;}
         </div>
       </div>
     </div>
-
-    <!-- Projects section -->
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px;margin-bottom:40px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
         <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:var(--text-muted);text-transform:uppercase">Projects</div>
@@ -2101,8 +2152,6 @@ html{scroll-behavior:smooth;}
     </div>
   </div>
   <div class="form-group"><label class="form-label">Description</label><textarea id="up_desc" class="form-textarea" rows="3" placeholder="Tell us about this project…"></textarea></div>
-
-  <!-- Main file upload -->
   <div class="form-group">
     <label class="form-label" id="upFileLabel">Project File</label>
     <div class="upload-zone" id="uploadZone">
@@ -2112,12 +2161,10 @@ html{scroll-behavior:smooth;}
     </div>
     <input type="file" id="up_file" accept="image/*,video/*" style="display:none">
   </div>
-
-  <!-- Thumbnail section — shown only for video categories -->
   <div id="thumbnailSection" style="display:none;margin-bottom:16px">
     <label class="form-label" style="display:flex;align-items:center;gap:8px">
       🖼️ Custom Thumbnail
-      <span style="font-size:11px;font-weight:400;color:var(--text-muted)">(optional — shows in Discover instead of video)</span>
+      <span style="font-size:11px;font-weight:400;color:var(--text-muted)">(optional)</span>
     </label>
     <div class="upload-zone" id="thumbnailZone" style="min-height:110px" onclick="document.getElementById('up_thumbnail').click()">
       <div style="font-size:28px;margin-bottom:6px">🎞️</div>
@@ -2126,7 +2173,6 @@ html{scroll-behavior:smooth;}
     </div>
     <input type="file" id="up_thumbnail" accept="image/*" style="display:none" onchange="previewThumbnail(this)">
   </div>
-
   <button class="btn btn-primary" style="width:100%;justify-content:center;margin-top:4px;padding:12px" onclick="doUpload()">Publish Project</button>
 </div>
 </div>
@@ -2169,9 +2215,7 @@ html{scroll-behavior:smooth;}
   <div class="modal-title">Edit Profile</div>
   <div class="modal-sub">Your info & preview — social links require Pro.</div>
   <div class="ep-grid">
-    <!-- LEFT: form -->
     <div>
-      <!-- Avatar upload -->
       <div class="form-group" style="display:flex;align-items:center;gap:16px;margin-bottom:20px">
         <div id="epAvatarPreview" class="avatar" style="width:64px;height:64px;font-size:22px;font-weight:700;background:#FF5C00;flex-shrink:0;cursor:pointer;border:2px solid var(--border2);transition:opacity .2s" onclick="triggerAvatarUpload()" title="Click to change photo">?</div>
         <div>
@@ -2197,19 +2241,25 @@ html{scroll-behavior:smooth;}
       <div class="form-group"><label class="form-label">Bio</label><textarea id="ep_bio" class="form-textarea" rows="3" placeholder="Tell clients about yourself…" oninput="updateProfilePreview()"></textarea></div>
       <div class="form-group"><label class="form-label">Skills (comma separated)</label><input type="text" id="ep_skills" class="form-input" placeholder="Photoshop, Figma, After Effects" oninput="updateProfilePreview()"></div>
       <div class="form-group"><label class="form-label">Tags (comma separated)</label><input type="text" id="ep_tags" class="form-input" placeholder="Branding, Logo, Social Media" oninput="updateProfilePreview()"></div>
+      <div class="form-group" style="border:1px solid rgba(255,215,0,0.2);border-radius:10px;padding:12px 14px;background:rgba(255,215,0,0.04)">
+        <label class="form-label" style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          🏅 Title Badge
+          <span style="font-size:10px;font-weight:500;background:rgba(255,215,0,0.15);color:#ffd700;border:1px solid rgba(255,215,0,0.3);border-radius:100px;padding:2px 8px">Admin Only</span>
+        </label>
+        <input type="text" id="ep_titleBadge" class="form-input" placeholder="No badge assigned" readonly
+          style="cursor:not-allowed;opacity:0.7;border-color:rgba(255,215,0,0.25);background:rgba(255,215,0,0.06);color:#ffd700;font-weight:600;font-size:13px">
+        <div style="font-size:11px;color:var(--text-muted);margin-top:6px">🔒 Admin panel eken witharak set karanna puluwan.</div>
+      </div>
       <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
         <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:12px">Social Links <span class="badge badge-orange" style="margin-left:6px">Pro Only</span></div>
-        <div id="socialLinksForm">
-          <div class="form-group"><label class="form-label">📸 Instagram URL</label><input type="text" id="ep_instagram" class="form-input" placeholder="https://instagram.com/yourhandle" oninput="updateProfilePreview()"></div>
-          <div class="form-group"><label class="form-label">💬 WhatsApp Number</label><input type="text" id="ep_whatsapp" class="form-input" placeholder="94XXXXXXXXX" oninput="updateProfilePreview()"></div>
-          <div class="form-group"><label class="form-label">▶️ YouTube URL</label><input type="text" id="ep_youtube" class="form-input" placeholder="https://youtube.com/@channel"></div>
-          <div class="form-group"><label class="form-label">🅱️ Behance URL</label><input type="text" id="ep_behance" class="form-input" placeholder="https://behance.net/yourname"></div>
-          <div class="form-group"><label class="form-label">🎵 TikTok URL</label><input type="text" id="ep_tiktok" class="form-input" placeholder="https://tiktok.com/@handle"></div>
-          <div class="form-group"><label class="form-label">🌐 Website URL</label><input type="text" id="ep_website" class="form-input" placeholder="https://yoursite.com"></div>
-        </div>
+        <div class="form-group"><label class="form-label">📸 Instagram URL</label><input type="text" id="ep_instagram" class="form-input" placeholder="https://instagram.com/yourhandle" oninput="updateProfilePreview()"></div>
+        <div class="form-group"><label class="form-label">💬 WhatsApp Number</label><input type="text" id="ep_whatsapp" class="form-input" placeholder="94XXXXXXXXX" oninput="updateProfilePreview()"></div>
+        <div class="form-group"><label class="form-label">▶️ YouTube URL</label><input type="text" id="ep_youtube" class="form-input" placeholder="https://youtube.com/@channel"></div>
+        <div class="form-group"><label class="form-label">🅱️ Behance URL</label><input type="text" id="ep_behance" class="form-input" placeholder="https://behance.net/yourname"></div>
+        <div class="form-group"><label class="form-label">🎵 TikTok URL</label><input type="text" id="ep_tiktok" class="form-input" placeholder="https://tiktok.com/@handle"></div>
+        <div class="form-group"><label class="form-label">🌐 Website URL</label><input type="text" id="ep_website" class="form-input" placeholder="https://yoursite.com"></div>
       </div>
     </div>
-    <!-- RIGHT: preview -->
     <div>
       <div class="profile-preview-card" style="position:sticky;top:20px">
         <div style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-muted);margin-bottom:16px">Profile Preview</div>
@@ -2282,12 +2332,10 @@ html{scroll-behavior:smooth;}
 </div>
 </div>
 
-<!-- JOB DETAIL + APPLY MODAL -->
+<!-- JOB DETAIL -->
 <div class="modal-overlay" id="modal-jobdetail">
 <div class="modal" style="max-width:520px">
   <button class="modal-close" onclick="closeModal('jobdetail')">×</button>
-
-  <!-- Job summary header -->
   <div style="display:flex;align-items:flex-start;gap:14px;padding:0 0 18px 0;border-bottom:1px solid var(--border);margin-bottom:20px">
     <div id="jd_icon" style="width:52px;height:52px;border-radius:14px;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:26px;flex-shrink:0">🎨</div>
     <div style="flex:1;min-width:0">
@@ -2301,14 +2349,10 @@ html{scroll-behavior:smooth;}
     </div>
     <div id="jd_salary" style="font-family:var(--font-display);font-size:17px;font-weight:800;color:var(--orange);white-space:nowrap;flex-shrink:0;padding-top:4px"></div>
   </div>
-
-  <!-- About the role -->
   <div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:22px">
     <div style="font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px">About This Role</div>
     <div id="jd_desc" style="font-size:13px;color:var(--text);line-height:1.75;white-space:pre-wrap"></div>
   </div>
-
-  <!-- Apply / Brief section -->
   <div style="background:var(--surface2);border:1px solid var(--border2);border-radius:14px;padding:20px">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px">
       <div style="width:36px;height:36px;background:var(--orange);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">📨</div>
@@ -2317,79 +2361,38 @@ html{scroll-behavior:smooth;}
         <div style="font-size:11px;color:var(--text-muted);margin-top:1px">Goes straight to the employer's notification panel</div>
       </div>
     </div>
-
-    <!-- hidden fields -->
     <input type="hidden" id="ja_jobTitle">
     <input type="hidden" id="ja_company">
     <input type="hidden" id="ja_posterId">
     <input type="hidden" id="ja_posterName">
-
-    <!-- Name + WA -->
     <div class="form-row">
-      <div class="form-group">
-        <label class="form-label">Your Name *</label>
-        <input type="text" id="ja_name" class="form-input" placeholder="Kasun Perera">
-      </div>
-      <div class="form-group">
-        <label class="form-label">WhatsApp *</label>
-        <input type="text" id="ja_wa" class="form-input" placeholder="+94 7X XXX XXXX">
-      </div>
+      <div class="form-group"><label class="form-label">Your Name *</label><input type="text" id="ja_name" class="form-input" placeholder="Kasun Perera"></div>
+      <div class="form-group"><label class="form-label">WhatsApp *</label><input type="text" id="ja_wa" class="form-input" placeholder="+94 7X XXX XXXX"></div>
     </div>
-
-    <!-- Role + Experience -->
     <div class="form-row">
-      <div class="form-group">
-        <label class="form-label">Your Specialty</label>
+      <div class="form-group"><label class="form-label">Your Specialty</label>
         <select id="ja_role" class="form-select">
           <option value="">Select…</option>
-          <option>Graphic Designer</option>
-          <option>Video Editor</option>
-          <option>Motion Graphics Artist</option>
-          <option>Brand Designer</option>
-          <option>Illustrator</option>
-          <option>Social Media Designer</option>
-          <option>3D & VFX Artist</option>
-          <option>Cinematographer</option>
-          <option>UI/UX Designer</option>
-          <option>Content Creator</option>
-          <option>Other</option>
+          <option>Graphic Designer</option><option>Video Editor</option>
+          <option>Motion Graphics Artist</option><option>Brand Designer</option>
+          <option>Illustrator</option><option>Social Media Designer</option>
+          <option>3D & VFX Artist</option><option>Cinematographer</option>
+          <option>UI/UX Designer</option><option>Content Creator</option><option>Other</option>
         </select>
       </div>
-      <div class="form-group">
-        <label class="form-label">Experience</label>
+      <div class="form-group"><label class="form-label">Experience</label>
         <select id="ja_exp" class="form-select">
           <option value="">Select…</option>
-          <option>Less than 1 year</option>
-          <option>1 – 2 years</option>
-          <option>3 – 5 years</option>
-          <option>5+ years</option>
+          <option>Less than 1 year</option><option>1 – 2 years</option>
+          <option>3 – 5 years</option><option>5+ years</option>
         </select>
       </div>
     </div>
-
-    <!-- Portfolio link -->
-    <div class="form-group">
-      <label class="form-label">Portfolio / Work Samples (link)</label>
-      <input type="text" id="ja_portfolio" class="form-input" placeholder="https://behance.net/you  or  Drive link">
-    </div>
-
-    <!-- Cover note -->
-    <div class="form-group">
-      <label class="form-label">Cover Note *</label>
-      <textarea id="ja_note" class="form-textarea" rows="4" placeholder="Introduce yourself, why you're the right fit, and your availability…"></textarea>
-    </div>
-
-    <!-- Salary expectation -->
-    <div class="form-group">
-      <label class="form-label">Salary Expectation (LKR/mo)</label>
-      <input type="text" id="ja_salary" class="form-input" placeholder="e.g. 85,000  or  Negotiable">
-    </div>
-
-    <!-- Buttons -->
+    <div class="form-group"><label class="form-label">Portfolio / Work Samples (link)</label><input type="text" id="ja_portfolio" class="form-input" placeholder="https://behance.net/you  or  Drive link"></div>
+    <div class="form-group"><label class="form-label">Cover Note *</label><textarea id="ja_note" class="form-textarea" rows="4" placeholder="Introduce yourself, why you're the right fit, and your availability…"></textarea></div>
+    <div class="form-group"><label class="form-label">Salary Expectation (LKR/mo)</label><input type="text" id="ja_salary" class="form-input" placeholder="e.g. 85,000  or  Negotiable"></div>
     <div style="display:flex;gap:10px;margin-top:6px">
-      <button class="btn btn-primary" style="flex:1;justify-content:center;padding:13px;font-size:14px" onclick="doApplyJob()">
-        🚀 Send Brief
-      </button>
+      <button class="btn btn-primary" style="flex:1;justify-content:center;padding:13px;font-size:14px" onclick="doApplyJob()">🚀 Send Brief</button>
       <a id="jd_waBtn" href="#" target="_blank" class="btn" style="background:#25D366;color:white;border:none;padding:13px 16px;border-radius:10px;text-decoration:none;display:none;align-items:center;gap:6px;font-size:13px;font-weight:600;flex-shrink:0">💬 WA</a>
     </div>
     <div id="jd_emailRow" style="display:none;margin-top:8px">
@@ -2399,8 +2402,7 @@ html{scroll-behavior:smooth;}
 </div>
 </div>
 
-
-<!-- ── MEDIA VIEWER OVERLAY ─────────────────────────────────── -->
+<!-- MEDIA VIEWER -->
 <div id="mediaViewerOverlay" class="modal-overlay" onclick="if(event.target===this)closeMediaViewer()" style="z-index:2000;align-items:center;justify-content:center;padding:16px">
   <div style="background:var(--surface);border-radius:20px;width:100%;max-width:760px;max-height:90vh;overflow-y:auto;position:relative;padding:24px 24px 20px">
     <button onclick="closeMediaViewer()" style="position:absolute;top:14px;right:16px;border:none;background:var(--surface2);color:var(--text);border-radius:50%;width:34px;height:34px;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center;z-index:1">✕</button>
@@ -2414,7 +2416,7 @@ html{scroll-behavior:smooth;}
 <div class="toast" id="toast"></div>
 
 <script>
-// ── NON-MODULE HELPERS ──────────────────────────────────────
+// ── PAGE NAV ────────────────────────────────────────────────
 function showPage(name){
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.getElementById('page-'+name).classList.add('active');
@@ -2425,33 +2427,74 @@ function showPage(name){
 
 // ── MOBILE NAV ───────────────────────────────────────────────
 function toggleMobileNav(){
-  const drawer=document.getElementById('mobileDrawer');
-  const btn=document.getElementById('navHamburger');
-  const open=drawer.classList.toggle('open');
-  btn.classList.toggle('open',open);
-  document.body.style.overflow=open?'hidden':'';
+  const drawer = document.getElementById('mobileDrawer');
+  const btn    = document.getElementById('navHamburger');
+  const open   = drawer.classList.toggle('open');
+  btn.classList.toggle('open', open);
+  document.body.style.overflow = open ? 'hidden' : '';
 }
 function closeMobileNav(){
   document.getElementById('mobileDrawer').classList.remove('open');
   document.getElementById('navHamburger').classList.remove('open');
-  document.body.style.overflow='';
+  document.body.style.overflow = '';
 }
-// Update mobile nav actions based on auth state
+
+// Inject user-aware content into the mobile drawer
 function updateMobileNavActions(){
-  const el=document.getElementById('mobileNavActions');
-  if(!el) return;
-  if(window.CU){
-    const name=window.CUD?.firstName||'Me';
-    el.innerHTML=`
-      <a onclick="openMyPortfolio();closeMobileNav()">👤 My Portfolio (${name})</a>
-      <a onclick="showPage('dashboard');loadDashboard();closeMobileNav()">📊 Dashboard</a>
-      <button class="btn btn-ghost" style="width:100%;justify-content:center" onclick="doSignOut();closeMobileNav()">Sign Out</button>`;
+  const pill      = document.getElementById('nmUserPill');
+  const authLinks = document.getElementById('nmAuthLinks');
+  const authBtns  = document.getElementById('nmAuthBtns');
+
+  if(window.CU && window.CUD){
+    const name = window.CUD.firstName || 'Me';
+    const plan = window.CUD.isPro ? '⭐ Pro Plan' : 'Free Plan';
+    const ini  = ((window.CUD.firstName?.[0]||'')+(window.CUD.lastName?.[0]||'')).toUpperCase()||'?';
+    const avatarHTML = window.CUD.avatarURL
+      ? `<img src="${window.CUD.avatarURL}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`
+      : `<div style="width:38px;height:38px;border-radius:50%;background:${window.CUD.avatarColor||'#FF5C00'};display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:white;flex-shrink:0">${ini}</div>`;
+
+    pill.innerHTML = `
+      <div class="nm-user" onclick="showPage('dashboard');loadDashboard();closeMobileNav()">
+        <div style="width:38px;height:38px;border-radius:50%;overflow:hidden;flex-shrink:0">${avatarHTML}</div>
+        <div class="nm-user-info">
+          <div class="nm-user-name">${name}</div>
+          <div class="nm-user-plan">${plan}</div>
+        </div>
+        <div style="color:var(--text-muted);font-size:12px">→</div>
+      </div>`;
+
+    authLinks.innerHTML = `
+      <div class="nm-divider"></div>
+      <button class="nm-link" onclick="openMyPortfolio();closeMobileNav()">
+        <div class="nm-link-icon">🌐</div> My Portfolio
+      </button>
+      <button class="nm-link" onclick="showPage('dashboard');loadDashboard();closeMobileNav()">
+        <div class="nm-link-icon">📊</div> Dashboard
+      </button>
+      <button class="nm-link" onclick="openModal('upload');closeMobileNav()">
+        <div class="nm-link-icon">⬆️</div> Upload Project
+      </button>
+      <button class="nm-link" onclick="openEditProfile();closeMobileNav()">
+        <div class="nm-link-icon">👤</div> Edit Profile
+      </button>`;
+
+    authBtns.innerHTML = `
+      <button class="btn btn-ghost" style="justify-content:center;color:#f87171;border-color:rgba(239,68,68,0.3)" onclick="doSignOut();closeMobileNav()">🚪 Sign Out</button>`;
   } else {
-    el.innerHTML=`
-      <button class="btn btn-primary" style="width:100%;justify-content:center" onclick="openModal('auth');closeMobileNav()">Join Free</button>
-      <button class="btn btn-ghost" style="width:100%;justify-content:center" onclick="openModal('auth');closeMobileNav()">Sign In</button>`;
+    pill.innerHTML = '';
+    authLinks.innerHTML = '';
+    authBtns.innerHTML = `
+      <button class="btn btn-primary" style="justify-content:center" onclick="openModal('auth');closeMobileNav()">Join Free</button>
+      <button class="btn btn-ghost"   style="justify-content:center" onclick="openModal('auth');closeMobileNav()">Sign In</button>`;
   }
 }
+
+// Close drawer when tapping backdrop (set on the overlay itself via onclick)
+// Also close on ESC
+document.addEventListener('keydown', e=>{
+  if(e.key==='Escape') closeMobileNav();
+});
+
 function setActive(el){
   document.querySelectorAll('.nav-links a').forEach(a=>a.classList.remove('active'));
   el.classList.add('active');
@@ -2492,80 +2535,6 @@ function switchDashTab(tab, el){
   if(tab==='inquiries'&&window.loadDashInquiries) window.loadDashInquiries();
   if((tab==='projects'||tab==='overview')&&window.loadDashboard) window.loadDashboard();
   if(tab==='admin') loadAdminPanel();
-}
-
-// ── STATIC JOBS fallback ────────────────────────────────────
-function renderStaticJobsInline(el){
-  const staticJobs=[
-    {title:'Senior Graphic Designer',company:'Leo Burnett Sri Lanka',type:'Full-time',location:'Colombo 03',salary:'120,000',category:'Graphic Design',icon:'🎨',desc:'Create compelling visual identities and campaign materials for top Sri Lankan brands.'},
-    {title:'Video Editor — Social Media',company:'Tuk Tuk Digital',type:'Freelance',location:'Remote',salary:'60,000',category:'Video Editing',icon:'🎬',desc:'Edit Reels, TikToks, and YouTube Shorts for 10+ active brand clients per month.'},
-    {title:'Motion Graphics Artist',company:'Hemas Holdings',type:'Full-time',location:'Colombo 10',salary:'95,000',category:'Motion Design',icon:'✨',desc:'After Effects animations and product launch videos for a leading Sri Lankan conglomerate.'},
-    {title:'Brand Designer',company:'Mintpay',type:'Full-time',location:'Hybrid',salary:'110,000',category:'Branding',icon:'🚀',desc:'Own the visual language of Sri Lanka\'s fastest-growing fintech.'},
-    {title:'UI/UX Designer',company:'IronOne Technologies',type:'Full-time',location:'Colombo 05',salary:'130,000',category:'UI/UX',icon:'📱',desc:'Design intuitive banking interfaces used by millions. Figma-first team.'},
-    {title:'Wedding Videographer',company:'Luminary Films LK',type:'Freelance',location:'Island-wide',salary:'Per project',category:'Videography',icon:'💍',desc:'Cinematic wedding films across Sri Lanka. Travel covered.'},
-  ];
-  el.innerHTML+=staticJobs.map((j,i)=>{
-    const key='inline_'+i;
-    window._jobStore=window._jobStore||{};
-    window._jobStore[key]={...j,description:j.desc};
-    return `<div class="job-card" style="opacity:.85;cursor:pointer" onclick="openJobDetail('${key}')">
-      <div class="job-icon">${j.icon}</div>
-      <div class="job-info">
-        <div class="job-title">${j.title}</div>
-        <div class="job-company" style="margin-bottom:4px">${j.company}</div>
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">${j.desc}</div>
-        <div class="job-tags">
-          <span class="badge badge-gray">${j.type}</span>
-          <span class="badge badge-gray">📍 ${j.location}</span>
-          ${j.category?`<span class="badge badge-purple">${j.category}</span>`:''}
-        </div>
-      </div>
-      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">
-        <div class="job-salary">${j.salary==='Per project'?'Per project':'LKR '+j.salary}</div>
-        <span style="background:var(--orange);color:white;border-radius:6px;padding:4px 12px;font-size:11px;font-weight:700">Apply →</span>
-      </div>
-    </div>`;}).join('');
-}
-
-function renderStaticJobs(){
-  const staticJobs=[
-    {title:'Senior Graphic Designer',company:'Leo Burnett Sri Lanka',type:'Full-time',location:'Colombo 03',salary:'120,000',category:'Graphic Design',icon:'🎨',desc:'Create compelling visual identities and campaign materials for top Sri Lankan and regional brands.'},
-    {title:'Video Editor — Social Media',company:'Tuk Tuk Digital',type:'Freelance',location:'Remote',salary:'60,000',category:'Video Editing',icon:'🎬',desc:'Edit fast-paced Reels, TikToks, and YouTube Shorts for 10+ active brand clients per month.'},
-    {title:'Motion Graphics Artist',company:'Hemas Holdings',type:'Full-time',location:'Colombo 10',salary:'95,000',category:'Motion Design',icon:'✨',desc:'Produce After Effects animations and product launch videos for a Fortune 500-equivalent local conglomerate.'},
-    {title:'Brand Designer',company:'Mintpay',type:'Full-time',location:'Hybrid — Colombo',salary:'110,000',category:'Branding',icon:'🚀',desc:'Own the visual language of Sri Lanka\'s fastest-growing fintech. Work closely with product and marketing.'},
-    {title:'Wedding Videographer',company:'Luminary Films LK',type:'Freelance',location:'Island-wide',salary:'Per project',category:'Videography',icon:'💍',desc:'Cinematic wedding films shot across Sri Lanka. Premiere Pro & DaVinci Resolve workflow. Travel covered.'},
-    {title:'UI/UX Designer',company:'IronOne Technologies',type:'Full-time',location:'Colombo 05',salary:'130,000',category:'UI/UX',icon:'📱',desc:'Design intuitive digital banking and fintech interfaces used by millions. Figma-first team.'},
-    {title:'Content Creator — Lifestyle',company:'ODEL PLC',type:'Part-time',location:'Colombo / Remote',salary:'45,000',category:'Content Creation',icon:'📸',desc:'Produce photo and video content for ODEL\'s social channels. Must have own camera and editing skills.'},
-    {title:'3D Visualiser',company:'Odel Home & Living',type:'Full-time',location:'Colombo',salary:'85,000',category:'3D Design',icon:'🧊',desc:'Create photorealistic 3D renders of furniture and interiors for e-commerce and print catalogs.'},
-    {title:'YouTube Video Editor',company:'Tech with Malindu',type:'Freelance',location:'Remote',salary:'40,000',category:'Video Editing',icon:'▶️',desc:'Edit weekly tech review videos. Must deliver within 24hrs of raw footage. Long-term collaboration.'},
-    {title:'Packaging Designer',company:'MAS Active',type:'Contract',location:'Biyagama',salary:'90,000',category:'Graphic Design',icon:'📦',desc:'Design export-ready apparel packaging for global clients including Nike and Victoria\'s Secret.'},
-  ];
-  const el=document.getElementById('jobsList');
-  el.innerHTML=`<div style="background:var(--surface2);border:1px dashed var(--border2);border-radius:10px;padding:10px 16px;margin-bottom:16px;font-size:12px;color:var(--text-muted);display:flex;align-items:center;gap:8px">
-    <span style="background:var(--orange);color:white;border-radius:4px;padding:2px 7px;font-size:10px;font-weight:700;letter-spacing:.5px">DEMO</span>
-    Sample job listings — be the first to post a real job!
-    ${CU?`<button onclick="openModal('postjob')" style="margin-left:auto;border:none;background:var(--orange);color:white;border-radius:6px;padding:4px 12px;font-size:11px;font-weight:600;cursor:pointer">+ Post a Job</button>`:''}
-  </div>`+staticJobs.map((j,i)=>{
-    const key = 'static_'+i;
-    window._jobStore = window._jobStore||{};
-    window._jobStore[key] = {...j, description:j.desc};
-    return `<div class="job-card" style="opacity:.85;cursor:pointer" onclick="openJobDetail('${key}')">
-      <div class="job-icon">${j.icon}</div>
-      <div class="job-info">
-        <div class="job-title">${j.title}</div>
-        <div class="job-company" style="margin-bottom:4px">${j.company}</div>
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;line-height:1.5">${j.desc}</div>
-        <div class="job-tags">
-          <span class="badge badge-gray">${j.type}</span>
-          <span class="badge badge-gray">📍 ${j.location}</span>
-          ${j.category?`<span class="badge badge-purple">${j.category}</span>`:''}
-        </div>
-      </div>
-      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">
-        <div class="job-salary">${j.salary==='Per project'?'Per project':'LKR '+j.salary}</div>
-        <span style="background:var(--orange);color:white;border-radius:6px;padding:4px 12px;font-size:11px;font-weight:700;letter-spacing:.3px">Apply →</span>
-      </div>
-    </div>`;}).join('');
 }
 </script>
 </body>
