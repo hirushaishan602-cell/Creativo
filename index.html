@@ -36,15 +36,17 @@ function isAdmin(){ return CU && ADMIN_UIDS.includes(CU.uid); }
 
 onAuthStateChanged(auth, async (user) => {
   if (user) {
-    CU = user;
+    CU = user; window.CU = user;
     const snap = await getDoc(doc(db,"users",user.uid));
     CUD = snap.exists() ? snap.data() : {};
+    window.CUD = CUD;
     updateNavLoggedIn();
     if(document.getElementById('page-dashboard').classList.contains('active')) loadDashboard();
     if(document.getElementById('page-jobs').classList.contains('active')) loadJobs();
     subscribeInquiries();
   } else {
     CU = null; CUD = null;
+    window.CU = null; window.CUD = null;
     updateNavLoggedOut();
     if(unsubInquiries){ unsubInquiries(); unsubInquiries=null; }
     document.getElementById('notifDot').style.display='none';
@@ -70,6 +72,7 @@ function updateNavLoggedIn(){
   const adminTab = document.getElementById('adminNavTab');
   if(adminTab) adminTab.style.display = isAdmin() ? 'flex' : 'none';
   if(typeof updateMobileNavActions==='function') updateMobileNavActions();
+  if(typeof updateMobileBottomNav==='function') updateMobileBottomNav();
 }
 function updateNavLoggedOut(){
   document.getElementById('navSignIn').style.display='';
@@ -77,6 +80,7 @@ function updateNavLoggedOut(){
   document.getElementById('navDash').style.display='none';
   document.getElementById('navSignOut').style.display='none';
   if(typeof updateMobileNavActions==='function') updateMobileNavActions();
+  if(typeof updateMobileBottomNav==='function') updateMobileBottomNav();
 }
 
 function subscribeInquiries(){
@@ -206,9 +210,10 @@ window.doUpload = async function(){
       setUploadZoneLoading(false);
     }
     let thumbnailURL='';
-    if(window._thumbnailFile){
+    const thumbSource = window._thumbnailFile || (window._aiThumbOverride && window._aiBlob ? new File([window._aiBlob],'ai-thumbnail.png',{type:'image/png'}) : null);
+    if(thumbSource){
       showToast('⏳ Uploading thumbnail...');
-      thumbnailURL=await uploadToCloudinary(window._thumbnailFile);
+      thumbnailURL=await uploadToCloudinary(thumbSource);
     }
     const authorName=`${CUD?.firstName||''} ${CUD?.lastName||''}`.trim();
     await addDoc(collection(db,"projects"),{
@@ -233,26 +238,30 @@ function setUploadZoneLoading(on){
   if(on) z.innerHTML='<div style="font-size:32px">☁️</div><p style="margin-top:8px;font-weight:500;color:var(--text-muted)">Uploading to cloud...</p>';
 }
 function resetUploadZone(){
+  document.getElementById('aiResult').style.display='none';
+  document.getElementById('aiUsedBadge').style.display='none';
+  document.getElementById('aiPrompt').value='';
+  document.getElementById('aiThumbPanel').style.display='none';
+  document.getElementById('aiChevron').style.transform='rotate(0)';
   document.getElementById('uploadZone').innerHTML=`<div style="font-size:36px;margin-bottom:8px">📁</div><div style="font-size:14px;font-weight:500;color:var(--text)">Drop files here or click to upload</div><div style="font-size:12px;color:var(--text-muted);margin-top:4px">Images or Video · Max 50MB free / 250MB Pro</div>`;
   document.getElementById('up_title').value='';
   document.getElementById('up_desc').value='';
   document.getElementById('up_file').value='';
   document.getElementById('up_thumbnail').value='';
-  document.getElementById('thumbnailSection').style.display='none';
+  // thumbnailSection always visible
   document.getElementById('thumbnailZone').innerHTML=`<div style="font-size:28px;margin-bottom:6px">🎞️</div><div style="font-size:13px;font-weight:500;color:var(--text)">Click to add thumbnail</div><div style="font-size:11px;color:var(--text-muted);margin-top:3px">JPG / PNG · Recommended 1280×720</div>`;
   window._thumbnailFile = null;
+  window._aiThumbOverride = false;
 }
 
 const VIDEO_CATEGORIES = ['Video Edit','Motion Graphics','Reels / Shorts','Film / Cinematic','3D & VFX','Wedding & Events'];
 
 window.toggleThumbnailSection = function(cat){
-  const sec = document.getElementById('thumbnailSection');
   const fileLabel = document.getElementById('upFileLabel');
+  // thumbnailSection is always visible; just update the file label
   if(VIDEO_CATEGORIES.includes(cat)){
-    sec.style.display = 'block';
     fileLabel.textContent = 'Video File';
   } else {
-    sec.style.display = 'none';
     fileLabel.textContent = 'Project File';
   }
 };
@@ -276,16 +285,54 @@ window.clearThumbnail = function(e){
   document.getElementById('thumbnailZone').innerHTML = `<div style="font-size:28px;margin-bottom:6px">🎞️</div><div style="font-size:13px;font-weight:500;color:var(--text)">Click to add thumbnail</div><div style="font-size:11px;color:var(--text-muted);margin-top:3px">JPG / PNG · Recommended 1280×720</div>`;
 };
 
+window.filterProjects = function(category, el){
+  // Switch to discover page if not already there
+  const discoverPage = document.getElementById('page-discover');
+  if(!discoverPage.classList.contains('active')){
+    showPage('discover');
+  }
+  // Activate the correct tab
+  const tabs = document.querySelectorAll('#discoverFilters .filter-tab');
+  tabs.forEach(t => t.classList.remove('active'));
+  if(el){
+    el.classList.add('active');
+  } else {
+    // Find matching tab by scanning onclick attribute for the category string
+    let matched = false;
+    tabs.forEach(t => {
+      const oc = t.getAttribute('onclick')||'';
+      if(category==='all' && oc.includes("'all'")){ t.classList.add('active'); matched=true; }
+      else if(oc.includes("'"+category+"'")){ t.classList.add('active'); matched=true; }
+    });
+    if(!matched && category==='all') tabs[0] && tabs[0].classList.add('active');
+  }
+  loadPublicProjects(category);
+  // Scroll to discover section
+  setTimeout(()=>{
+    const sec = document.getElementById('discoverSection');
+    if(sec) sec.scrollIntoView({behavior:'smooth'});
+  }, 150);
+};
+
+window.setTabActive = function(el, containerId){
+  document.querySelectorAll('#'+containerId+' .filter-tab').forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+};
+
 window.loadPublicProjects = async function(category='all'){
   const grid=document.getElementById('projectGrid');
   grid.innerHTML=skeletonCards(6);
   try{
-    let q = category==='all'
-      ? query(collection(db,"projects"),orderBy("createdAt","desc"))
-      : query(collection(db,"projects"),where("category","==",category),orderBy("createdAt","desc"));
+    // Always fetch all, then filter client-side to avoid Firestore composite index issues
+    let q = query(collection(db,"projects"),orderBy("createdAt","desc"));
     const snap=await getDocs(q);
     if(snap.empty){grid.innerHTML=emptyState('🎨','No projects yet','Be the first to upload your work!','Upload Project','openModal(\'upload\')');return;}
-    const projects = snap.docs.map(d=>({id:d.id,...d.data()}));
+    let projects = snap.docs.map(d=>({id:d.id,...d.data()}));
+    // Client-side filter
+    if(category && category!=='all'){
+      projects = projects.filter(p=>(p.category||'').toLowerCase().trim() === category.toLowerCase().trim());
+    }
+    if(projects.length===0){grid.innerHTML=emptyState('🎨','No projects in this category','Be the first to upload!','Upload Project','openModal(\'upload\')');return;}
     const uniqueAuthorIds = [...new Set(projects.map(p=>p.authorId).filter(Boolean))];
     const userMap = {};
     await Promise.all(uniqueAuthorIds.map(async uid=>{
@@ -344,7 +391,7 @@ function projectCard(p,bg,isOwn){
     <div class="portfolio-info">
       <div class="portfolio-info-top">
         <div class="portfolio-title">${p.title}</div>
-        <span class="badge badge-gray" style="font-size:10px">${p.category||'Design'}</span>
+        <span class="badge badge-gray" style="font-size:10px;cursor:pointer" title="Browse ${p.category}" onclick="event.stopPropagation();filterProjects('${(p.category||'Design').replace(/'/g,"\\'")}',null)">${p.category||'Design'}</span>
       </div>
       <div class="portfolio-creator">
         <div class="avatar" style="${avatarStyle};width:26px;height:26px;font-size:10px">${avatarContent}</div>
@@ -581,7 +628,7 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
         return `<div class="portfolio-card" onclick="openMediaViewer('${p.coverURL||''}','${safeTitle2}','${safeDesc2}',${p.likes||0},${p.views||0})">
           <div class="portfolio-thumb" style="background:${bg2}">${thumbInner2}<div class="portfolio-thumb-overlay"></div></div>
           <div class="portfolio-info">
-            <div class="portfolio-info-top"><div class="portfolio-title">${p.title}</div><span class="badge badge-gray" style="font-size:10px">${p.category||'Design'}</span></div>
+            <div class="portfolio-info-top"><div class="portfolio-title">${p.title}</div><span class="badge badge-gray" style="font-size:10px;cursor:pointer" onclick="event.stopPropagation();filterProjects('${(p.category||'Design').replace(/'/g,"\\'")}',null)" title="Browse ${p.category}">${p.category||'Design'}</span></div>
             <div class="portfolio-creator">
               <div class="avatar" style="${avatarStyle2};width:26px;height:26px;font-size:10px">${avatarContent2}</div>
               <div class="creator-name">${p.authorName||'Creative'}</div>
@@ -613,11 +660,15 @@ window.openMediaViewer = function(coverURL, title, description, likes, views){
   const statsEl = document.getElementById('mediaViewerStats');
   const isVideo = coverURL && (coverURL.includes('/video/') || coverURL.match(/\.(mp4|mov|webm)/i));
   if(isVideo){
-    mediaEl.innerHTML=`<video src="${coverURL}" controls autoplay playsinline
-      style="max-width:100%;max-height:70vh;border-radius:12px;background:#000;display:block;margin:0 auto"></video>`;
+    mediaEl.innerHTML=`<div style="position:relative;width:100%;background:#000;border-radius:20px 20px 0 0;overflow:hidden">
+      <video src="${coverURL}" controls autoplay playsinline
+        style="width:100%;max-height:60vh;display:block;object-fit:contain;background:#000"></video>
+    </div>`;
   } else if(coverURL){
-    mediaEl.innerHTML=`<img src="${coverURL}" alt="${title}"
-      style="max-width:100%;max-height:70vh;border-radius:12px;object-fit:contain;display:block;margin:0 auto">`;
+    mediaEl.innerHTML=`<div style="width:100%;border-radius:20px 20px 0 0;overflow:hidden;background:#111;text-align:center">
+      <img src="${coverURL}" alt="${title}"
+        style="max-width:100%;max-height:65vh;object-fit:contain;display:block;margin:0 auto">
+    </div>`;
   } else {
     mediaEl.innerHTML=`<div style="font-size:80px;text-align:center;padding:40px">🎨</div>`;
   }
@@ -740,7 +791,9 @@ async function loadDashInquiries(){
     const snap=await getDocs(q);
     const sorted=snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
     const el=document.getElementById('dashInquiries');
-    if(sorted.length===0){el.innerHTML='<div style="text-align:center;padding:24px;color:var(--text-muted);font-size:14px">No briefs received yet. Share your profile to get hired!</div>';return;}
+    const ovEl=document.getElementById('dashOverviewBriefs');
+    const emptyMsg='<div style="text-align:center;padding:24px;color:var(--text-muted);font-size:14px">No briefs received yet. Share your profile to get hired!</div>';
+    if(sorted.length===0){el.innerHTML=emptyMsg;if(ovEl)ovEl.innerHTML=emptyMsg;return;}
     el.innerHTML=sorted.map(inq=>{
       return `<div class="project-row" style="${inq.read?'':'background:var(--surface3);border-radius:8px;padding:12px;'}">
         <div style="width:40px;height:40px;border-radius:50%;background:var(--orange-pale);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">📩</div>
@@ -756,6 +809,25 @@ async function loadDashInquiries(){
         </div>
       </div>`;
     }).join('');
+    // Also populate Overview briefs card (top 3, compact)
+    if(ovEl){
+      ovEl.innerHTML=sorted.slice(0,3).map(inq=>{
+        return `<div class="project-row" style="${inq.read?'':'background:var(--surface3);border-radius:8px;padding:10px;'}">
+          <div style="width:36px;height:36px;border-radius:50%;background:var(--orange-pale);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0">${inq.read?'📬':'📩'}</div>
+          <div class="project-row-info">
+            <div class="project-row-name" style="font-size:13px">${inq.projectTitle} ${!inq.read?'<span style="background:var(--orange);color:white;font-size:9px;padding:1px 6px;border-radius:100px;font-weight:700;vertical-align:middle">NEW</span>':''}</div>
+            <div class="project-row-meta">from <strong style="color:var(--text)">${inq.name}</strong> · ${inq.projectType||''} · Budget: ${inq.budget}</div>
+          </div>
+          <div style="display:flex;gap:5px;flex-shrink:0;align-items:center">
+            <a href="https://wa.me/${inq.whatsapp}" target="_blank" style="border:none;background:#25D366;color:white;border-radius:6px;padding:5px 9px;cursor:pointer;font-size:11px;text-decoration:none;display:flex;align-items:center">WhatsApp</a>
+            <button onclick="deleteInquiry('${inq.id}')" style="border:none;background:rgba(239,68,68,0.12);color:#f87171;border-radius:6px;padding:5px 7px;cursor:pointer;font-size:12px" title="Delete brief">🗑</button>
+          </div>
+        </div>`;
+      }).join('');
+      if(sorted.length>3){
+        ovEl.innerHTML+=`<div style="text-align:center;padding:10px 0 4px;font-size:13px;color:var(--text-muted)">+${sorted.length-3} more brief${sorted.length-3>1?'s':''} — <span onclick="switchDashTab('inquiries',document.getElementById('dashTabInquiries'));if(typeof dmtSetActive==='function')dmtSetActive('inquiries')" style="color:var(--orange);cursor:pointer;font-weight:500">See all</span></div>`;
+      }
+    }
   }catch(e){console.error(e);}
 }
 
@@ -956,6 +1028,7 @@ window.doSaveProfile = async function(){
     }
     const snap=await getDoc(doc(db,"users",CU.uid));
     CUD=snap.data();
+    window.CUD = CUD;
     updateNavLoggedIn();
     closeModal('editprofile');
     showToast('✅ Profile updated!');
@@ -1330,6 +1403,27 @@ nav{position:sticky;top:0;z-index:200;background:rgba(13,13,13,.92);backdrop-fil
 .nav-actions{display:flex;gap:10px;align-items:center;}
 .avatar{border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;flex-shrink:0;}
 
+/* Mobile nav — logo only strip */
+@media(max-width:768px){
+  nav{
+    height:48px;
+    padding:0 1rem;
+    justify-content:center;
+    border-bottom:1px solid rgba(255,255,255,0.05);
+  }
+  .nav-links,
+  .nav-actions,
+  .nav-hamburger{
+    display:none !important;
+  }
+  .nav-logo{
+    font-size:20px;
+    letter-spacing:-.3px;
+  }
+  /* Push pages down to account for slim top bar */
+  body{padding-top:0;}
+}
+
 /* NOTIF */
 .notif-wrap{position:relative;}
 #notifBtn{background:var(--surface);border:1px solid var(--border2);border-radius:50%;width:38px;height:38px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:18px;}
@@ -1378,6 +1472,21 @@ nav{position:sticky;top:0;z-index:200;background:rgba(13,13,13,.92);backdrop-fil
 .portfolio-thumb{width:100%;height:200px;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;}
 .portfolio-thumb-overlay{position:absolute;inset:0;background:rgba(0,0,0,0);transition:background .2s;}
 .portfolio-card:hover .portfolio-thumb-overlay{background:rgba(0,0,0,.15);}
+/* YouTube play button overlay on cards */
+.portfolio-play-overlay{
+  position:absolute;inset:0;
+  display:flex;align-items:center;justify-content:center;
+  pointer-events:none;
+}
+.portfolio-play-btn{
+  width:50px;height:50px;
+  background:rgba(0,0,0,.7);
+  border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  backdrop-filter:blur(4px);
+  transition:transform .18s;
+}
+.portfolio-card:hover .portfolio-play-btn{transform:scale(1.1);}
 .portfolio-info{padding:16px;}
 .portfolio-info-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;}
 .portfolio-title{font-family:var(--font-display);font-size:15px;font-weight:700;color:var(--text);}
@@ -1459,10 +1568,12 @@ nav{position:sticky;top:0;z-index:200;background:rgba(13,13,13,.92);backdrop-fil
 .dashboard{max-width:1200px;margin:0 auto;padding:40px 2rem;}
 .dash-grid{display:grid;grid-template-columns:220px 1fr;gap:24px;}
 .dash-sidebar{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px;height:fit-content;position:sticky;top:84px;}
+.dash-mobile-tabs { display: none; }
 .dash-nav{list-style:none;}
 .dash-nav li{padding:10px 14px;border-radius:var(--radius-sm);cursor:pointer;font-size:14px;font-weight:500;color:var(--text-muted);margin-bottom:2px;transition:all .15s;display:flex;align-items:center;gap:10px;}
 .dash-nav li:hover{background:var(--surface2);color:var(--text);}
 .dash-nav li.active{background:var(--surface2);color:var(--text);}
+.dash-nav-signout{display:none;}
 .dash-stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;}
 .dash-stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;}
 .dash-stat-val{font-family:var(--font-display);font-size:26px;font-weight:800;color:var(--text);line-height:1;}
@@ -1666,82 +1777,439 @@ html{scroll-behavior:smooth;}
    RESPONSIVE BREAKPOINTS
 ═══════════════════════════════════════════════ */
 @media(max-width:768px){
-  .nav-hamburger{display:flex;}
-  .nav-links{display:none;}
+  .nav-hamburger{display:none!important;}
+  .nav-links{display:none!important;}
   #navSignIn,#navJoin{display:none!important;}
+  .nav-actions{display:none!important;}
   nav{padding:0 1rem;}
 
-  .hero{grid-template-columns:1fr;padding:40px 1rem 32px;gap:24px;}
-  .hero h1{font-size:32px;letter-spacing:-1px;}
-  .hero p{font-size:14px;margin-bottom:24px;}
+  /* ── HERO ── */
+  .hero{grid-template-columns:1fr;padding:28px 1rem 20px;gap:16px;}
+  .hero h1{font-size:30px;letter-spacing:-1px;margin-bottom:12px;}
+  .hero p{font-size:13px;margin-bottom:18px;line-height:1.5;}
+  .hero-eyebrow{font-size:11px;padding:5px 11px;margin-bottom:16px;}
   .hero-cards-stack{display:none;}
   .hero>div:last-child{display:none;}
 
-  .stats-inner{gap:20px;}
-  .stat-num{font-size:22px;}
-  .stats-bar{padding:16px 1rem;}
+  /* ── STATS BAR ── */
+  .stats-inner{gap:0;justify-content:space-around;}
+  .stat-num{font-size:20px;}
+  .stat-label{font-size:10px;}
+  .stats-bar{padding:12px 0.75rem;}
 
-  .section{padding:32px 1rem;}
-  .section-header{flex-direction:column;align-items:flex-start;gap:14px;margin-bottom:20px;}
-  .section-title{font-size:22px;}
-  .filter-tabs{overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px;-webkit-overflow-scrolling:touch;}
-  .filter-tabs::-webkit-scrollbar{display:none;}
-  .filter-tab{white-space:nowrap;flex-shrink:0;padding:6px 14px;font-size:12px;}
+  /* ── SECTION ── */
+  .section{padding:16px 0 0;}
+  .section-header{flex-direction:column;align-items:flex-start;gap:8px;margin-bottom:10px;padding:0 12px;}
+  .section-title{font-size:20px;}
 
-  .portfolio-grid{grid-template-columns:1fr 1fr;gap:12px;}
-  .portfolio-thumb{height:160px;}
-  .portfolio-info{padding:10px;}
-  .portfolio-title{font-size:13px;}
-  .portfolio-stats{gap:8px;flex-wrap:wrap;}
-  .profile-grid{grid-template-columns:1fr 1fr;gap:12px;}
-  .profile-card{padding:16px 12px;}
-  .profile-avatar-big{width:48px;height:48px;font-size:18px;}
+  /* ── FILTER TABS — sticky under nav ── */
+  #discoverFilters{
+    position:sticky;top:64px;z-index:100;
+    background:var(--bg);
+    border-bottom:1px solid var(--border);
+    padding:8px 12px 10px;
+    margin:0;
+    overflow-x:visible;
+    flex-wrap:wrap;
+    gap:6px;
+  }
+  .filter-tabs{flex-wrap:wrap;overflow-x:visible;padding-bottom:2px;gap:6px;}
+  .filter-tab{white-space:nowrap;flex-shrink:0;padding:6px 13px;font-size:12px;}
 
-  .pricing-grid{grid-template-columns:1fr;}
+  /* ── DISCOVER FEED — YouTube-style vertical ── */
+  .portfolio-grid{
+    display:flex;
+    flex-direction:column;
+    gap:0;
+    padding:0;
+  }
+  .portfolio-card{
+    border-radius:0;
+    border-left:none;border-right:none;
+    border-top:none;
+    border-bottom:1px solid var(--border);
+    transform:none!important;
+    background: var(--bg);
+  }
+  .portfolio-card:hover{transform:none!important;border-color:var(--border);}
+  /* YouTube-style 16:9 thumbnail */
+  .portfolio-thumb{
+    height: auto !important;
+    aspect-ratio: 16/9;
+    max-height: none !important;
+  }
+  .portfolio-thumb img,
+  .portfolio-thumb video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .portfolio-info{padding:10px 12px 14px;}
+  .portfolio-info-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:6px;}
+  .portfolio-title{font-size:14px;font-weight:700;line-height:1.3;}
+  .portfolio-stats{gap:10px;margin-top:8px;padding-top:8px;}
+  .pstat{font-size:12px;}
 
-  .job-card{flex-wrap:wrap;gap:12px;padding:14px;}
-  .job-info{min-width:0;flex:1 1 100%;}
-  .job-icon{width:40px;height:40px;font-size:18px;}
+  /* ── CREATIVES GRID ── */
+  .profile-grid{grid-template-columns:1fr 1fr;gap:10px;padding:0 12px 16px;}
+  .profile-card{padding:14px 10px;border-radius:14px;}
+  .profile-avatar-big{width:44px;height:44px;font-size:17px;}
+  .profile-name{font-size:14px;}
 
-  .dashboard{padding:20px 1rem;}
-  .dash-grid{grid-template-columns:1fr;}
-  .dash-sidebar{position:static;padding:0;}
-  .dash-nav{display:flex;overflow-x:auto;gap:4px;padding-bottom:4px;}
-  .dash-nav::-webkit-scrollbar{display:none;}
-  .dash-nav li{white-space:nowrap;flex-shrink:0;padding:8px 14px;font-size:13px;}
-  .dash-stats-row{grid-template-columns:1fr 1fr;gap:10px;}
-  .dash-stat-val{font-size:20px;}
+  /* ── JOBS — compact mobile cards ── */
+  .jobs-list{gap:8px;padding:0 12px 16px;}
+  .job-card{
+    padding:12px;
+    gap:10px;
+    border-radius:12px;
+    align-items:flex-start;
+  }
+  .job-icon{width:36px;height:36px;font-size:16px;border-radius:10px;flex-shrink:0;}
+  .job-info{flex:1;min-width:0;}
+  .job-title{font-size:13px;margin-bottom:2px;}
+  .job-company{font-size:11px;}
+  .job-tags{gap:4px;margin-top:6px;}
+  .job-tags .badge{font-size:10px;padding:2px 7px;}
+  .job-salary{font-size:13px;white-space:nowrap;}
 
-  .profile-page{padding:20px 1rem;}
-  .profile-hero{flex-direction:column;gap:16px;margin-bottom:24px;}
-  .profile-hero-avatar{width:72px;height:72px;font-size:28px;}
-  .profile-hero-name{font-size:20px;}
-  .profile-hero-role{font-size:14px;}
-  #pvHeroBanner{height:140px!important;}
-  #page-profile .portfolio-grid{grid-template-columns:1fr!important;}
-  #page-profile .portfolio-thumb{height:180px;}
-  #pvActionBtns .btn{padding:7px 12px;font-size:12px;}
-  #pvActionBtns{gap:6px;}
+  /* ── PRICING ── */
+  .pricing-grid{grid-template-columns:1fr;padding:0 12px;}
 
-  .footer-inner{grid-template-columns:1fr;gap:24px;padding:32px 1rem 24px;}
-  .footer-bottom{flex-direction:column;gap:8px;text-align:center;}
+  /* ── DASHBOARD ── */
+  .dashboard{padding:12px 0.75rem 20px;overflow-x:hidden;}
+  .dash-grid{grid-template-columns:1fr;gap:12px;}
 
-  .modal{padding:24px 20px;border-radius:16px;}
-  .modal-title{font-size:18px;}
+  /* Header — stack title + buttons vertically */
+  #dashHeader{
+    flex-direction:column;
+    align-items:flex-start;
+    margin-bottom:14px !important;
+    gap:10px;
+  }
+  #dashHeaderBtns{
+    width:100%;
+    gap:8px;
+  }
+  #dashHeaderBtns .btn{
+    flex:1;
+    justify-content:center;
+    padding:9px 8px;
+    font-size:13px;
+    min-width:0;
+  }
+  #dashHeader > div:first-child > div:first-child{
+    font-size:20px;
+  }
+
+  /* Sidebar — hide avatar pill, show tab bar */
+  .dash-sidebar{
+    position:static;
+    padding:0;
+    background:transparent;
+    border:none;
+    border-radius:0;
+    overflow:hidden;
+  }
+  .dash-sidebar > div:first-child{display:none !important;}
+  .dash-nav{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:6px;
+    padding:0 0 6px 0;
+    overflow:visible;
+  }
+  .dash-nav li{
+    white-space:nowrap;
+    padding:9px 10px;
+    font-size:12px;
+    border-radius:10px;
+    background:var(--surface);
+    border:1px solid var(--border);
+    margin-bottom:0;
+    text-align:center;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+  .dash-nav li.active{
+    background:var(--orange);
+    color:white !important;
+    border-color:var(--orange);
+  }
+  /* Admin tab — full width if shown */
+  .dash-nav li#adminNavTab{
+    grid-column:1/-1;
+  }
+  /* Sign out button in nav — full width */
+  .dash-nav-signout{
+    display:block;
+    grid-column:1/-1;
+    margin-top:2px;
+    padding:9px 10px;
+    font-size:12px;
+    border-radius:10px;
+    background:rgba(239,68,68,0.08);
+    border:1px solid rgba(239,68,68,0.25);
+    color:#f87171;
+    cursor:pointer;
+    text-align:center;
+    font-weight:500;
+    width:100%;
+    list-style:none;
+  }
+
+  /* Stats — 2×2 grid */
+  .dash-stats-row{
+    grid-template-columns:1fr 1fr;
+    gap:8px;
+    margin-bottom:12px;
+  }
+  .dash-stat{
+    padding:12px 10px;
+    min-width:0;
+    overflow:hidden;
+  }
+  .dash-stat-val{font-size:22px;}
+  .dash-stat-label{font-size:11px;}
+  .dash-stat-note{font-size:10px;}
+
+  /* Cards */
+  .dash-card{padding:14px 12px;border-radius:14px;margin-bottom:12px;}
+  .dash-card-header{margin-bottom:12px;}
+  .dash-card-title{font-size:14px;}
+
+  /* Dashboard header buttons — stack on small screens */
+  #dashHeaderBtns{flex-wrap:wrap;gap:8px;}
+  #dashHeaderBtns .btn{font-size:12px;padding:7px 12px;}
+  /* Hide header sign-out on mobile — dash-nav grid handles it */
+  #dashHeaderBtns .btn:last-child{display:none;}
+
+  /* Project rows */
+  .project-row{gap:8px;padding:9px 0;flex-wrap:nowrap;align-items:center;}
+  .project-row-info{min-width:0;flex:1;}
+  .project-row-name{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .project-row-meta{font-size:11px;}
+
+  /* Briefs — stack action buttons full width */
+  #dashInquiries .project-row{flex-wrap:wrap;gap:6px;}
+  #dashInquiries .project-row > div:last-child{
+    width:100%;display:flex;gap:6px;flex-wrap:wrap;
+  }
+  #dashInquiries .project-row > div:last-child a,
+  #dashInquiries .project-row > div:last-child button{
+    flex:1;justify-content:center;text-align:center;min-width:0;
+  }
+
+  /* ── MOBILE DASHBOARD INNER TABS — hide, using scroll pills above ── */
+  .dash-mobile-tabs { display: none !important; }
+
+  /* My Projects grid — 2 col */
+  #dashProjectsFull > div{
+    grid-template-columns:1fr 1fr !important;
+    gap:10px !important;
+  }
+
+  /* ── PROFILE PAGE ── */
+  .profile-page{padding:16px 1rem;}
+  .profile-hero{flex-direction:column;gap:14px;margin-bottom:20px;}
+  .profile-hero-avatar{width:68px;height:68px;font-size:26px;}
+  .profile-hero-name{font-size:19px;}
+  .profile-hero-role{font-size:13px;}
+
+  /* ── FOOTER ── */
+  .footer-inner{grid-template-columns:1fr;gap:20px;padding:24px 1rem 20px;}
+  .footer-bottom{flex-direction:column;gap:6px;text-align:center;padding:14px 1rem;}
+
+  /* ── MODAL ── */
+  .modal{padding:20px 16px;border-radius:16px;}
+  .modal-title{font-size:17px;}
   .form-row{grid-template-columns:1fr;}
   .ep-grid{grid-template-columns:1fr;}
   #modal-editprofile .modal{max-width:100%;}
 
-  .toast{bottom:16px;right:16px;left:16px;text-align:center;}
+  .toast{bottom:12px;right:12px;left:12px;text-align:center;}
+
+  /* ── SECTION PADDING for non-discover pages ── */
+  #page-creatives .section,
+  #page-jobs .section,
+  #page-pricing .section{padding:16px 0 16px;}
+  #page-jobs .section-header,
+  #page-creatives .section-header{padding:0 12px;margin-bottom:12px;}
 }
 
 @media(max-width:480px){
-  .portfolio-grid{grid-template-columns:1fr;}
-  .profile-grid{grid-template-columns:1fr;}
+  /* Feed stays single column, already flex */
+  .profile-grid{grid-template-columns:1fr 1fr;}
   .dash-stats-row{grid-template-columns:1fr 1fr;}
-  .hero h1{font-size:28px;}
-  .stat-num{font-size:20px;}
-  .stat-label{font-size:11px;}
+  .hero h1{font-size:26px;}
+  .stat-num{font-size:18px;}
+  .stat-label{font-size:10px;}
+  .portfolio-thumb{height:60vw;}
+}
+
+@media(max-width:640px){
+  #pvHeroBanner{height:160px!important;}
+}
+
+/* ══════════════════════════════════════════════
+   MOBILE BOTTOM NAV — YouTube/TikTok style
+═══════════════════════════════════════════════ */
+#mobileBottomNav {
+  display: none;
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  height: 62px;
+  background: rgba(14,14,14,0.97);
+  border-top: 1px solid rgba(255,255,255,0.07);
+  z-index: 200;
+  align-items: stretch;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+.mbn-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  cursor: pointer;
+  transition: opacity .15s;
+  -webkit-tap-highlight-color: transparent;
+  border: none;
+  background: none;
+  padding: 0 4px;
+  position: relative;
+  overflow: hidden;
+}
+/* top active indicator bar */
+.mbn-item::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 50%;
+  transform: translateX(-50%) scaleX(0);
+  width: 24px; height: 2px;
+  background: var(--orange);
+  border-radius: 0 0 2px 2px;
+  transition: transform .2s cubic-bezier(.34,1.56,.64,1);
+}
+.mbn-item.active::before { transform: translateX(-50%) scaleX(1); }
+.mbn-item:active { opacity: .55; }
+.mbn-icon {
+  font-size: 20px;
+  line-height: 1;
+  transition: transform .2s cubic-bezier(.34,1.56,.64,1), color .15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  color: var(--text-muted);
+}
+.mbn-icon svg {
+  width: 22px; height: 22px;
+  stroke: currentColor;
+  transition: stroke .15s;
+}
+.mbn-item.active .mbn-icon {
+  transform: scale(1.18);
+  color: var(--orange);
+}
+.mbn-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: .2px;
+  transition: color .15s;
+}
+.mbn-item.active .mbn-label { color: var(--orange); }
+
+/* Upload button — orange pill with Creativo logo */
+.mbn-upload-btn {
+  width: 72px; height: 34px;
+  background: var(--orange);
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 4px 18px rgba(255,92,0,.5);
+  transition: transform .2s, box-shadow .2s;
+}
+.mbn-item:active .mbn-upload-btn {
+  transform: scale(.88);
+  box-shadow: 0 2px 8px rgba(255,92,0,.3);
+}
+.mbn-notif-dot {
+  position: absolute; top: 6px; right: calc(50% - 17px);
+  width: 7px; height: 7px;
+  background: var(--orange);
+  border-radius: 50%;
+  border: 1.5px solid #0e0e0e;
+  display: none;
+}
+
+@media(max-width:768px){
+  #mobileBottomNav { display: flex; }
+  /* Push page content above bottom nav */
+  body { padding-bottom: 62px; }
+  .toast { bottom: 76px; }
+
+  /* ── MOBILE PROJECT VIEWER — fullscreen bottom sheet ── */
+  #mediaViewerOverlay {
+    align-items: flex-end !important;
+    padding: 0 !important;
+  }
+  #mediaViewerOverlay > div {
+    border-radius: 20px 20px 0 0 !important;
+    max-width: 100% !important;
+    max-height: 92vh !important;
+    width: 100% !important;
+    padding: 0 !important;
+  }
+  #mediaViewerContent {
+    margin-bottom: 0 !important;
+  }
+  #mediaViewerContent img,
+  #mediaViewerContent video {
+    border-radius: 0 !important;
+    max-height: 52vw !important;
+    width: 100% !important;
+    object-fit: cover !important;
+  }
+  #mediaViewerInfo {
+    padding: 14px 16px 20px;
+  }
+  /* close btn mobile */
+  #mediaViewerOverlay > div > button {
+    top: 10px !important;
+    right: 12px !important;
+  }
+
+  /* ── FIX: portfolio cards don't overflow screen ── */
+  .portfolio-grid {
+    overflow-x: hidden;
+  }
+  .portfolio-card {
+    max-width: 100vw;
+    overflow: hidden;
+  }
+  /* ── FIX: profile page hero overflow ── */
+  #page-profile { overflow-x: hidden; }
+  #pvHeroBanner { overflow: hidden; }
+}
+
+/* ── MOBILE PROJECT VIEWER — drag handle + info area ── */
+#mvDragHandle {
+  width: 36px; height: 4px;
+  background: var(--border2);
+  border-radius: 2px;
+  margin: 10px auto 4px;
+  display: none;
+}
+@media(max-width:768px){
+  #mvDragHandle { display: block; }
+}
+#mediaViewerInfo {
+  padding: 14px 20px 8px;
 }
 </style>
 </head>
@@ -1858,7 +2326,7 @@ html{scroll-behavior:smooth;}
         <div class="filter-tab" onclick="filterProjects('Wedding & Events',this)">Wedding</div>
       </div>
     </div>
-    <div class="portfolio-grid" id="projectGrid"></div>
+    <div class="portfolio-grid" id="projectGrid" style="padding-bottom:24px"></div>
   </div>
 </div>
 
@@ -1928,14 +2396,15 @@ html{scroll-behavior:smooth;}
 <!-- DASHBOARD -->
 <div class="page" id="page-dashboard">
   <div class="dashboard">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:32px;flex-wrap:wrap;gap:12px">
+    <div id="dashHeader" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:32px;flex-wrap:wrap;gap:12px">
       <div>
         <div style="font-family:var(--font-display);font-size:24px;font-weight:800;color:var(--text)">My Dashboard</div>
         <div style="font-size:13px;color:var(--text-muted);margin-top:4px" id="dashPlanLabel">Free Plan</div>
       </div>
-      <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <div id="dashHeaderBtns" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
         <button class="btn btn-ghost" onclick="openEditProfile()">✏️ Edit Profile</button>
         <button class="btn btn-primary" onclick="openModal('upload')">+ Upload Project</button>
+        <button class="btn btn-ghost" onclick="doSignOut()" style="color:#f87171;border-color:rgba(239,68,68,0.35);font-size:13px">🚪 Sign Out</button>
       </div>
     </div>
     <div class="dash-grid">
@@ -1952,12 +2421,25 @@ html{scroll-behavior:smooth;}
           <li onclick="switchDashTab('projects',this)">🖼️ My Projects</li>
           <li onclick="switchDashTab('inquiries',this)" id="dashTabInquiries">📬 Briefs</li>
           <li onclick="openMyPortfolio()">🌐 My Portfolio</li>
-          <li onclick="openEditProfile()">👤 Edit Profile</li>
-          <li onclick="openModal('upload')">⬆️ Upload Project</li>
-          <li onclick="showPage('pricing')">⭐ Upgrade to Pro</li>
           <li id="adminNavTab" onclick="switchDashTab('admin',this)" style="display:none;color:#f59e0b">🛡️ Admin Panel</li>
-          <li onclick="doSignOut()" style="margin-top:12px;padding-top:14px;border-top:1px solid var(--border)">🚪 Sign Out</li>
+          <li class="dash-nav-signout" onclick="doSignOut()">🚪 Sign Out</li>
         </ul>
+
+        <!-- Mobile-only inner tab bar -->
+        <div class="dash-mobile-tabs" id="dashMobileTabs">
+          <button class="dmt-btn active" id="dmt-overview" onclick="switchDashTab('overview',this);dmtSetActive('overview')">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+            Overview
+          </button>
+          <button class="dmt-btn" id="dmt-projects" onclick="switchDashTab('projects',this);dmtSetActive('projects')">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="14" rx="2"/><path d="M3 20h18"/></svg>
+            Projects
+          </button>
+          <button class="dmt-btn" id="dmt-inquiries" onclick="switchDashTab('inquiries',this);dmtSetActive('inquiries')">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+            Briefs
+          </button>
+        </div>
       </div>
       <div>
         <div class="dash-stats-row">
@@ -1975,6 +2457,14 @@ html{scroll-behavior:smooth;}
             <div id="dashOverviewInsight" style="background:var(--surface2);border-radius:10px;padding:14px 16px;margin-bottom:16px;font-size:13px;color:var(--text-muted);line-height:1.6;display:none"></div>
             <div class="dash-card-header" style="margin-top:4px"><span class="dash-card-title" style="font-size:14px">Recent Projects</span><button class="btn btn-ghost btn-sm" onclick="openModal('upload')">+ Add</button></div>
             <div id="dashProjects"></div>
+          </div>
+          <!-- Briefs section inside Overview -->
+          <div class="dash-card" id="dashOverviewBriefsCard">
+            <div class="dash-card-header">
+              <span class="dash-card-title">📬 Client Briefs</span>
+              <button class="btn btn-ghost btn-sm" onclick="switchDashTab('inquiries',document.getElementById('dashTabInquiries'));document.getElementById('dmt-inquiries')&&dmtSetActive('inquiries')" style="font-size:12px">See all →</button>
+            </div>
+            <div id="dashOverviewBriefs"></div>
           </div>
         </div>
         <div id="dashTabProjects" class="dash-tab-content">
@@ -2012,74 +2502,59 @@ html{scroll-behavior:smooth;}
 
 <!-- PROFILE PAGE -->
 <div class="page" id="page-profile">
-  <div id="pvHeroBanner" style="width:100%;height:200px;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%);position:relative;overflow:hidden">
+  <div id="pvHeroBanner" style="width:100%;height:260px;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%);position:relative;overflow:hidden">
     <div id="pvHeroBannerOverlay" style="position:absolute;inset:0;background:rgba(0,0,0,.35)"></div>
-    <div id="pvHeroBannerEditBtn" style="display:none;position:absolute;top:12px;right:12px">
-      <button onclick="triggerBannerUpload()" style="background:rgba(255,255,255,.15);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.25);color:white;border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">🖼 Change Cover</button>
+    <div id="pvHeroBannerEditBtn" style="display:none;position:absolute;top:16px;right:16px">
+      <button onclick="triggerBannerUpload()" style="background:rgba(255,255,255,.15);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.25);color:white;border-radius:8px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer">🖼 Change Cover</button>
       <input type="file" id="bannerFileInput" accept="image/*" style="display:none" onchange="handleBannerUpload(this)">
     </div>
   </div>
-  <div style="max-width:860px;margin:0 auto;padding:0 12px">
-    <div style="position:relative;margin-top:-50px;margin-bottom:20px">
-      <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px 16px 20px">
-
-        <!-- Avatar + Action Buttons row -->
-        <div style="display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:16px">
+  <div style="max-width:860px;margin:0 auto;padding:0 20px">
+    <div style="position:relative;margin-top:-60px;margin-bottom:28px">
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:28px 32px 24px">
+        <div style="display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:16px;margin-bottom:20px">
           <div style="position:relative">
-            <div id="pvAvatar" class="profile-hero-avatar" style="background:#6B4EFF;width:76px;height:76px;font-size:28px;border:3px solid var(--surface)">?</div>
-            <div id="pvAvatarEditBtn" style="display:none;position:absolute;bottom:0;right:0;background:var(--orange);border-radius:50%;width:24px;height:24px;align-items:center;justify-content:center;cursor:pointer;font-size:12px" onclick="openEditProfile()" title="Edit profile">✏️</div>
+            <div id="pvAvatar" class="profile-hero-avatar" style="background:#6B4EFF;width:88px;height:88px;font-size:32px;border:4px solid var(--surface)">?</div>
+            <div id="pvAvatarEditBtn" style="display:none;position:absolute;bottom:0;right:0;background:var(--orange);border-radius:50%;width:26px;height:26px;align-items:center;justify-content:center;cursor:pointer;font-size:13px" onclick="openEditProfile()" title="Edit profile">✏️</div>
           </div>
-          <div id="pvActionBtns" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+          <div id="pvActionBtns" style="display:flex;gap:10px;flex-wrap:wrap"></div>
         </div>
-
-        <!-- Name + badges -->
-        <div style="margin-bottom:12px">
-          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">
-            <div id="pvName" style="font-family:var(--font-display);font-size:22px;font-weight:800;color:var(--text);line-height:1.2">—</div>
+        <div style="margin-bottom:16px">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px">
+            <div class="profile-hero-name" id="pvName" style="font-size:26px">—</div>
             <span id="pvProBadge" style="display:none" class="badge badge-orange">PRO</span>
-            <span id="pvVerifiedBadge" style="display:none;background:#3b82f6;border-radius:50%;width:20px;height:20px;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="11" height="11"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="white"/></svg></span>
+            <span id="pvVerifiedBadge" style="display:none" class="verified-badge"><svg viewBox="0 0 24 24" width="11" height="11"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="white"/></svg></span>
           </div>
-          <div id="pvRole" style="font-size:14px;color:var(--text-muted);margin-bottom:4px">—</div>
+          <div class="profile-hero-role" id="pvRole" style="font-size:14px;margin-bottom:6px">—</div>
           <div id="pvUsername" style="font-size:12px;color:var(--text-muted)"></div>
         </div>
-
-        <!-- Bio -->
-        <div id="pvBio" style="font-size:13px;color:var(--text-muted);line-height:1.7;margin-bottom:12px"></div>
-
-        <!-- Location -->
-        <div id="pvLocationPill" style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border-radius:100px;padding:4px 12px;font-size:12px;color:var(--text-muted);margin-bottom:14px">
+        <div class="profile-hero-bio" id="pvBio" style="margin-bottom:14px"></div>
+        <div id="pvLocationPill" style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);border-radius:100px;padding:5px 14px;font-size:12px;color:var(--text-muted);margin-bottom:16px">
           📍 <span id="pvLocationText">Sri Lanka</span>
         </div>
-
-        <!-- Tags + Skills -->
         <div id="pvTags" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
-        <div id="pvSkills" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px"></div>
-
-        <!-- Social links -->
-        <div id="pvSocial" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px"></div>
-
-        <!-- Stats -->
-        <div style="display:flex;border-top:1px solid var(--border);padding-top:14px;gap:0">
+        <div id="pvSkills" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px"></div>
+        <div id="pvSocial" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px"></div>
+        <div style="display:flex;border-top:1px solid var(--border);padding-top:16px;gap:0">
           <div style="flex:1;text-align:center;padding:4px 0">
-            <div style="font-family:var(--font-display);font-size:20px;font-weight:800;color:var(--text)" id="pvStatProjects">0</div>
-            <div style="font-size:10px;font-weight:600;letter-spacing:.6px;color:var(--text-muted);text-transform:uppercase;margin-top:2px">Projects</div>
+            <div style="font-family:var(--font-display);font-size:22px;font-weight:800;color:var(--text)" id="pvStatProjects">0</div>
+            <div style="font-size:10px;font-weight:600;letter-spacing:.8px;color:var(--text-muted);text-transform:uppercase;margin-top:2px">Projects</div>
           </div>
           <div style="width:1px;background:var(--border)"></div>
           <div style="flex:1;text-align:center;padding:4px 0">
-            <div style="font-family:var(--font-display);font-size:20px;font-weight:800;color:var(--text)" id="pvStatLikes">0</div>
-            <div style="font-size:10px;font-weight:600;letter-spacing:.6px;color:var(--text-muted);text-transform:uppercase;margin-top:2px">Likes</div>
+            <div style="font-family:var(--font-display);font-size:22px;font-weight:800;color:var(--text)" id="pvStatLikes">0</div>
+            <div style="font-size:10px;font-weight:600;letter-spacing:.8px;color:var(--text-muted);text-transform:uppercase;margin-top:2px">Likes</div>
           </div>
           <div style="width:1px;background:var(--border)"></div>
           <div style="flex:1;text-align:center;padding:4px 0">
-            <div style="font-family:var(--font-display);font-size:20px;font-weight:800;color:var(--text)" id="pvStatViews">0</div>
-            <div style="font-size:10px;font-weight:600;letter-spacing:.6px;color:var(--text-muted);text-transform:uppercase;margin-top:2px">Views</div>
+            <div style="font-family:var(--font-display);font-size:22px;font-weight:800;color:var(--text)" id="pvStatViews">0</div>
+            <div style="font-size:10px;font-weight:600;letter-spacing:.8px;color:var(--text-muted);text-transform:uppercase;margin-top:2px">Views</div>
           </div>
         </div>
-
       </div>
     </div>
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:16px 14px;margin-bottom:32px">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px;margin-bottom:40px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
         <div style="font-size:11px;font-weight:700;letter-spacing:1px;color:var(--text-muted);text-transform:uppercase">Projects</div>
         <div id="pvUploadBtn" style="display:none"><button class="btn btn-primary btn-sm" onclick="openModal('upload')">+ Upload</button></div>
       </div>
@@ -2188,9 +2663,9 @@ html{scroll-behavior:smooth;}
     </div>
     <input type="file" id="up_file" accept="image/*,video/*" style="display:none">
   </div>
-  <div id="thumbnailSection" style="display:none;margin-bottom:16px">
+  <div id="thumbnailSection" style="margin-bottom:16px">
     <label class="form-label" style="display:flex;align-items:center;gap:8px">
-      🖼️ Custom Thumbnail
+      🖼️ Thumbnail
       <span style="font-size:11px;font-weight:400;color:var(--text-muted)">(optional)</span>
     </label>
     <div class="upload-zone" id="thumbnailZone" style="min-height:110px" onclick="document.getElementById('up_thumbnail').click()">
@@ -2200,6 +2675,85 @@ html{scroll-behavior:smooth;}
     </div>
     <input type="file" id="up_thumbnail" accept="image/*" style="display:none" onchange="previewThumbnail(this)">
   </div>
+  <!-- ✨ AI THUMBNAIL GENERATOR -->
+  <div style="margin-bottom:16px;border:1px solid var(--border);border-radius:14px;overflow:hidden;background:var(--surface)">
+    <div onclick="toggleAIThumb()" style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:var(--surface2);cursor:pointer;user-select:none">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:18px">✨</span>
+        <div>
+          <div style="font-size:13px;font-weight:700;color:var(--text)">AI Thumbnail Generator</div>
+          <div style="font-size:11px;color:var(--text-muted)">Prompt දීලා real AI image හදාගන්න</div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:10px;font-weight:700;background:linear-gradient(135deg,#FF5C00,#6B4EFF);color:#fff;padding:2px 8px;border-radius:100px;letter-spacing:.5px">AI</span>
+        <span id="aiChevron" style="color:var(--text-muted);font-size:11px;transition:transform .25s">▼</span>
+      </div>
+    </div>
+
+    <div id="aiThumbPanel" style="display:none;padding:16px 16px 14px">
+
+      <!-- Mode tabs -->
+      <div style="display:flex;gap:6px;margin-bottom:14px">
+        <button id="aiModePrompt" onclick="switchAIMode('prompt')" style="flex:1;padding:7px;border-radius:8px;border:2px solid var(--orange);background:rgba(255,92,0,0.12);color:var(--orange);font-size:12px;font-weight:700;cursor:pointer">🎨 Text Prompt</button>
+        <button id="aiModeFrame" onclick="switchAIMode('frame')" style="flex:1;padding:7px;border-radius:8px;border:1px solid var(--border2);background:var(--surface3);color:var(--text-muted);font-size:12px;font-weight:600;cursor:pointer">🎬 Video Frame</button>
+      </div>
+
+      <!-- TEXT PROMPT MODE -->
+      <div id="aiModePromptPanel">
+        <textarea id="aiPrompt" class="form-textarea" rows="2" style="font-size:13px;resize:none;margin-bottom:10px" placeholder='e.g. "cinematic blue tones, wedding couple, golden hour" හෝ "bold neon red, gaming edit, dark bg"'></textarea>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
+          <button onclick="aiSuggest('cinematic blue tones, dramatic lighting, film grain, epic')" style="font-size:11px;padding:4px 10px;border-radius:100px;border:1px solid var(--border2);background:var(--surface3);color:var(--text-muted);cursor:pointer">🎬 Cinematic</button>
+          <button onclick="aiSuggest('bold typography, vibrant neon colors, modern graphic design poster')" style="font-size:11px;padding:4px 10px;border-radius:100px;border:1px solid var(--border2);background:var(--surface3);color:var(--text-muted);cursor:pointer">🎨 Bold</button>
+          <button onclick="aiSuggest('golden hour romantic wedding couple soft bokeh warm tones')" style="font-size:11px;padding:4px 10px;border-radius:100px;border:1px solid var(--border2);background:var(--surface3);color:var(--text-muted);cursor:pointer">💍 Wedding</button>
+          <button onclick="aiSuggest('dark cyberpunk neon gaming montage dramatic action')" style="font-size:11px;padding:4px 10px;border-radius:100px;border:1px solid var(--border2);background:var(--surface3);color:var(--text-muted);cursor:pointer">🎮 Gaming</button>
+          <button onclick="aiSuggest('clean minimal white space elegant professional brand')" style="font-size:11px;padding:4px 10px;border-radius:100px;border:1px solid var(--border2);background:var(--surface3);color:var(--text-muted);cursor:pointer">✨ Minimal</button>
+          <button onclick="aiSuggest('abstract colorful gradient geometric shapes creative art')" style="font-size:11px;padding:4px 10px;border-radius:100px;border:1px solid var(--border2);background:var(--surface3);color:var(--text-muted);cursor:pointer">🌈 Abstract</button>
+        </div>
+        <button id="aiGenBtn" onclick="generateAIThumb()" class="btn btn-primary" style="width:100%;justify-content:center;padding:10px;font-size:13px">
+          ✨ Generate with AI
+        </button>
+      </div>
+
+      <!-- VIDEO FRAME MODE -->
+      <div id="aiModeFramePanel" style="display:none">
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;line-height:1.5">
+          🎬 Upload කරපු video එකෙන් best frame එක thumbnail හදාගන්න.
+        </div>
+        <div id="framePickerArea" style="display:none">
+          <video id="frameVideo" style="width:100%;border-radius:10px;margin-bottom:10px;max-height:180px;object-fit:contain;background:#000" controls></video>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+            <label style="font-size:12px;color:var(--text-muted);white-space:nowrap">Frame:</label>
+            <input type="range" id="frameSeek" min="0" max="100" value="0" style="flex:1;accent-color:var(--orange)" oninput="seekFrame(this.value)">
+            <span id="frameTime" style="font-size:11px;color:var(--text-muted);white-space:nowrap">0:00</span>
+          </div>
+          <button onclick="captureFrame()" class="btn btn-primary" style="width:100%;justify-content:center;padding:10px;font-size:13px">📸 Capture This Frame</button>
+        </div>
+        <div id="frameNoVideo" style="text-align:center;padding:20px;color:var(--text-muted);font-size:13px">
+          ⚠️ කලින් video file එකක් upload zone එකට add කරන්න
+        </div>
+      </div>
+
+      <!-- RESULT -->
+      <div id="aiResult" style="display:none;margin-top:14px">
+        <div style="font-size:11px;font-weight:700;letter-spacing:.6px;color:var(--text-muted);text-transform:uppercase;margin-bottom:8px">Preview</div>
+        <div id="aiResultInner" style="width:100%;border-radius:10px;overflow:hidden;margin-bottom:10px;border:1px solid var(--border);min-height:80px;display:flex;align-items:center;justify-content:center;background:var(--surface2)">
+          <canvas id="aiCanvas" width="1280" height="720" style="width:100%;display:block"></canvas>
+        </div>
+        <div id="aiLoadingOverlay" style="display:none;text-align:center;padding:30px;color:var(--text-muted)">
+          <div style="font-size:28px;margin-bottom:8px">⏳</div>
+          <div style="font-size:13px;font-weight:600" id="aiLoadingMsg">AI generate කරනවා...</div>
+          <div style="font-size:11px;margin-top:4px">ටිකක් ඉවසන්න (10-20s)</div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button onclick="useAIThumb()" class="btn btn-primary" style="flex:1;justify-content:center;padding:9px;font-size:13px">✅ Use This Thumbnail</button>
+          <button onclick="retryAIThumb()" class="btn btn-ghost" style="padding:9px 14px;font-size:13px">↺ Retry</button>
+        </div>
+        <div id="aiUsedBadge" style="display:none;margin-top:8px;text-align:center;font-size:12px;color:#22c55e;font-weight:600">✅ Set! Publish කරනකොට automatically upload වේ.</div>
+      </div>
+    </div>
+  </div>
+
   <button class="btn btn-primary" style="width:100%;justify-content:center;margin-top:4px;padding:12px" onclick="doUpload()">Publish Project</button>
 </div>
 </div>
@@ -2431,16 +2985,67 @@ html{scroll-behavior:smooth;}
 
 <!-- MEDIA VIEWER -->
 <div id="mediaViewerOverlay" class="modal-overlay" onclick="if(event.target===this)closeMediaViewer()" style="z-index:2000;align-items:center;justify-content:center;padding:16px">
-  <div style="background:var(--surface);border-radius:20px;width:100%;max-width:760px;max-height:90vh;overflow-y:auto;position:relative;padding:24px 24px 20px">
+  <div style="background:var(--surface);border-radius:20px;width:100%;max-width:760px;max-height:90vh;overflow-y:auto;position:relative">
+    <div id="mvDragHandle"></div>
     <button onclick="closeMediaViewer()" style="position:absolute;top:14px;right:16px;border:none;background:var(--surface2);color:var(--text);border-radius:50%;width:34px;height:34px;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center;z-index:1">✕</button>
-    <div id="mediaViewerContent" style="margin-bottom:16px"></div>
-    <div id="mediaViewerTitle" style="font-family:var(--font-display);font-size:18px;font-weight:700;color:var(--text);margin-bottom:6px"></div>
-    <div id="mediaViewerDesc" style="font-size:13px;color:var(--text-muted);margin-bottom:8px;line-height:1.6"></div>
-    <div id="mediaViewerStats" style="font-size:12px;color:var(--text-muted)"></div>
+    <div id="mediaViewerContent" style="margin-bottom:0"></div>
+    <div id="mediaViewerInfo" style="padding:16px 20px 20px">
+      <div id="mediaViewerTitle" style="font-family:var(--font-display);font-size:18px;font-weight:700;color:var(--text);margin-bottom:6px;padding-right:40px"></div>
+      <div id="mediaViewerDesc" style="font-size:13px;color:var(--text-muted);margin-bottom:8px;line-height:1.6"></div>
+      <div id="mediaViewerStats" style="font-size:12px;color:var(--text-muted)"></div>
+    </div>
   </div>
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- MOBILE BOTTOM NAV -->
+<nav id="mobileBottomNav">
+  <button class="mbn-item active" id="mbn-discover" onclick="showPage('discover');mbnSetActive('discover')">
+    <div class="mbn-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 9.5L12 3l9 6.5V20a1 1 0 01-1 1H4a1 1 0 01-1-1V9.5z"/>
+        <path d="M9 21V12h6v9"/>
+      </svg>
+    </div>
+    <div class="mbn-label">Discover</div>
+  </button>
+  <button class="mbn-item" id="mbn-creatives" onclick="showPage('creatives');loadPublicCreatives();mbnSetActive('creatives')">
+    <div class="mbn-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="9" cy="7" r="3"/>
+        <path d="M3 20c0-3.3 2.7-6 6-6"/>
+        <circle cx="17" cy="9" r="2.5"/>
+        <path d="M13.5 20c0-2.5 1.6-4.5 3.5-4.5s3.5 2 3.5 4.5"/>
+      </svg>
+    </div>
+    <div class="mbn-label">Creatives</div>
+  </button>
+  <button class="mbn-item" id="mbn-upload" onclick="mbnUploadTap()">
+    <span style="font-family:'Syne',sans-serif;font-size:12px;font-weight:800;color:var(--text);letter-spacing:-0.4px;line-height:1">Creativo<span style="color:var(--orange)">.</span></span>
+  </button>
+  <button class="mbn-item" id="mbn-jobs" onclick="showPage('jobs');loadJobs();mbnSetActive('jobs')">
+    <div class="mbn-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="7" width="20" height="14" rx="2"/>
+        <path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/>
+        <line x1="12" y1="12" x2="12" y2="16"/>
+        <line x1="10" y1="14" x2="14" y2="14"/>
+      </svg>
+    </div>
+    <div class="mbn-label">Jobs</div>
+  </button>
+  <button class="mbn-item" id="mbn-profile" onclick="mbnProfileTap()">
+    <div class="mbn-icon" id="mbnProfileIcon" style="width:28px;height:28px;border-radius:50%;overflow:hidden;flex-shrink:0;">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="8" r="4"/>
+        <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+      </svg>
+    </div>
+    <div class="mbn-label" id="mbnProfileLabel">Profile</div>
+    <div class="mbn-notif-dot" id="mbnNotifDot"></div>
+  </button>
+</nav>
 
 <script>
 // ── PAGE NAV ────────────────────────────────────────────────
@@ -2553,9 +3158,219 @@ function filterProjects(cat,el){
 }
 
 // ── DASHBOARD TABS ──────────────────────────────────────────
+
+// ── AI THUMBNAIL GENERATOR ─────────────────────────────────────────
+function toggleAIThumb(){
+  var p=document.getElementById('aiThumbPanel');
+  var c=document.getElementById('aiChevron');
+  var open=p.style.display==='none';
+  p.style.display=open?'block':'none';
+  c.style.transform=open?'rotate(180deg)':'rotate(0)';
+  if(open) switchAIMode('prompt');
+}
+
+function switchAIMode(mode){
+  var isPrompt=mode==='prompt';
+  document.getElementById('aiModePromptPanel').style.display=isPrompt?'block':'none';
+  document.getElementById('aiModeFramePanel').style.display=isPrompt?'none':'block';
+  var btnP=document.getElementById('aiModePrompt');
+  var btnF=document.getElementById('aiModeFrame');
+  btnP.style.cssText='flex:1;padding:7px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;'+(isPrompt?'border:2px solid var(--orange);background:rgba(255,92,0,0.12);color:var(--orange)':'border:1px solid var(--border2);background:var(--surface3);color:var(--text-muted)');
+  btnF.style.cssText='flex:1;padding:7px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;'+(!isPrompt?'border:2px solid var(--orange);background:rgba(255,92,0,0.12);color:var(--orange)':'border:1px solid var(--border2);background:var(--surface3);color:var(--text-muted)');
+  if(!isPrompt) checkVideoForFrame();
+}
+
+function checkVideoForFrame(){
+  var vFile=document.getElementById('up_file').files[0];
+  var picker=document.getElementById('framePickerArea');
+  var noVid=document.getElementById('frameNoVideo');
+  if(vFile&&vFile.type.startsWith('video/')){
+    var vid=document.getElementById('frameVideo');
+    vid.src=URL.createObjectURL(vFile);
+    vid.onloadedmetadata=function(){ document.getElementById('frameSeek').max=Math.floor(vid.duration); };
+    picker.style.display='block'; noVid.style.display='none';
+  } else {
+    picker.style.display='none'; noVid.style.display='block';
+  }
+}
+
+function seekFrame(val){
+  var vid=document.getElementById('frameVideo');
+  vid.currentTime=parseFloat(val);
+  var m=Math.floor(val/60),s=Math.floor(val%60);
+  document.getElementById('frameTime').textContent=m+':'+(s<10?'0':'')+s;
+}
+
+function captureFrame(){
+  var vid=document.getElementById('frameVideo');
+  var tmp=document.createElement('canvas');
+  tmp.width=1280; tmp.height=720;
+  tmp.getContext('2d').drawImage(vid,0,0,1280,720);
+  tmp.toBlob(function(blob){
+    window._thumbnailFile=new File([blob],'frame-thumb.png',{type:'image/png'});
+    var mc=document.getElementById('aiCanvas');
+    mc.getContext('2d').drawImage(vid,0,0,1280,720);
+    showAIResult();
+    showToast('Frame captured!');
+  },'image/png');
+}
+
+function aiSuggest(t){ document.getElementById('aiPrompt').value=t; }
+
+var _aiBlob=null;
+
+async function generateAIThumb(){
+  var prompt=document.getElementById('aiPrompt').value.trim();
+  if(!prompt){showToast('Prompt ekak liyanna');return;}
+  var btn=document.getElementById('aiGenBtn');
+  btn.textContent='Generating...'; btn.disabled=true;
+  _aiBlob=null;
+  document.getElementById('aiUsedBadge').style.display='none';
+  document.getElementById('aiResult').style.display='block';
+  document.getElementById('aiResultInner').style.display='none';
+  document.getElementById('aiLoadingOverlay').style.display='block';
+  document.getElementById('aiLoadingMsg').textContent='AI image generate karanaawa... (10-30s)';
+
+  var title=(document.getElementById('up_title').value||'Creative Work').trim();
+  var cat=document.getElementById('up_category').value||'Design';
+  var fullPrompt=prompt+', portfolio thumbnail, '+cat+', professional, vibrant, 16:9, high quality';
+  var encoded=encodeURIComponent(fullPrompt);
+  var seed=Math.floor(Math.random()*99999);
+  var imgUrl='https://image.pollinations.ai/prompt/'+encoded+'?width=1280&height=720&seed='+seed+'&nologo=true&enhance=true&model=flux';
+
+  var img=new Image();
+  img.crossOrigin='anonymous';
+  img.onload=function(){
+    var canvas=document.getElementById('aiCanvas');
+    var ctx=canvas.getContext('2d');
+    ctx.drawImage(img,0,0,1280,720);
+    ctx.font='bold 18px sans-serif';
+    ctx.fillStyle='rgba(255,255,255,0.2)';
+    ctx.textAlign='right'; ctx.textBaseline='bottom';
+    ctx.fillText('Creativo AI',1260,710);
+    canvas.toBlob(function(b){
+      _aiBlob=b;
+      window._thumbnailFile=new File([b],'ai-thumb.png',{type:'image/png'});
+    },'image/png');
+    showAIResult();
+    showToast('AI Image ready!');
+    btn.textContent='Generate with AI'; btn.disabled=false;
+  };
+  img.onerror=function(){
+    document.getElementById('aiLoadingMsg').textContent='Canvas thumbnail hadanaawa...';
+    renderCanvasThumb(prompt,title,cat);
+    showAIResult();
+    showToast('Thumbnail ready!');
+    btn.textContent='Generate with AI'; btn.disabled=false;
+  };
+  img.src=imgUrl;
+}
+
+function showAIResult(){
+  document.getElementById('aiLoadingOverlay').style.display='none';
+  document.getElementById('aiResultInner').style.display='flex';
+  document.getElementById('aiCanvas').style.display='block';
+  document.getElementById('aiResult').style.display='block';
+}
+
+function retryAIThumb(){
+  document.getElementById('aiResult').style.display='none';
+  document.getElementById('aiUsedBadge').style.display='none';
+  generateAIThumb();
+}
+
+function hexRGBA(hex,a){
+  try{
+    var r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
+    return 'rgba('+r+','+g+','+b+','+a+')';
+  }catch(e){return 'rgba(100,100,255,'+a+')';}
+}
+
+var PALETTES=[
+  {bg:'#0d0221',bg2:'#1a0533',accent:'#7c3aed',accent2:'#a78bfa'},
+  {bg:'#0f172a',bg2:'#1e3a5f',accent:'#0ea5e9',accent2:'#38bdf8'},
+  {bg:'#1a1a1a',bg2:'#2d2d2d',accent:'#FF5C00',accent2:'#ff8c42'},
+  {bg:'#0d1f12',bg2:'#14532d',accent:'#22c55e',accent2:'#86efac'},
+  {bg:'#0f0c29',bg2:'#302b63',accent:'#c084fc',accent2:'#e879f9'},
+];
+
+function renderCanvasThumb(prompt,title,cat){
+  var canvas=document.getElementById('aiCanvas');
+  var ctx=canvas.getContext('2d');
+  var W=1280,H=720;
+  var pal=PALETTES[Math.floor(Math.random()*PALETTES.length)];
+  var g=ctx.createLinearGradient(0,0,W,H);
+  g.addColorStop(0,pal.bg); g.addColorStop(1,pal.bg2);
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle=hexRGBA(pal.accent,0.08); ctx.lineWidth=1;
+  for(var x=0;x<W;x+=90){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+  for(var y=0;y<H;y+=90){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+  [[W*.15,H*.2,320],[W*.85,H*.8,260],[W*.5,H*.5,190]].forEach(function(arr,i){
+    var rg=ctx.createRadialGradient(arr[0],arr[1],0,arr[0],arr[1],arr[2]);
+    rg.addColorStop(0,hexRGBA(i%2===0?pal.accent:pal.accent2,0.22));
+    rg.addColorStop(1,hexRGBA(pal.bg,0));
+    ctx.fillStyle=rg; ctx.fillRect(0,0,W,H);
+  });
+  var lg=ctx.createLinearGradient(0,0,W,0);
+  lg.addColorStop(0,'transparent'); lg.addColorStop(.3,pal.accent); lg.addColorStop(.7,pal.accent2); lg.addColorStop(1,'transparent');
+  ctx.fillStyle=lg; ctx.fillRect(0,H/2-2,W,4);
+  var tg=ctx.createLinearGradient(0,H*.3,0,H*.88);
+  tg.addColorStop(0,'rgba(0,0,0,0)'); tg.addColorStop(1,'rgba(0,0,0,0.78)');
+  ctx.fillStyle=tg; ctx.fillRect(0,0,W,H);
+  ctx.shadowColor=pal.accent; ctx.shadowBlur=30;
+  ctx.font='bold 70px Syne,sans-serif';
+  ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.textBaseline='bottom';
+  var t=title.length>22?title.substring(0,20)+'...':title;
+  ctx.fillText(t,W/2,H/2+5);
+  ctx.shadowBlur=0;
+  ctx.fillStyle=hexRGBA(pal.accent,0.9);
+  ctx.font='bold 15px sans-serif';
+  var pw=ctx.measureText(cat).width+48;
+  rrect(ctx,W/2-pw/2,H/2+14,pw,34,17); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.textBaseline='middle';
+  ctx.fillText(cat.toUpperCase(),W/2,H/2+31);
+  var bb=ctx.createLinearGradient(0,0,W,0);
+  bb.addColorStop(0,pal.accent); bb.addColorStop(1,pal.accent2);
+  ctx.fillStyle=bb; ctx.fillRect(0,H-5,W,5);
+  ctx.font='500 18px sans-serif';
+  ctx.fillStyle='rgba(255,255,255,0.2)';
+  ctx.textAlign='right'; ctx.textBaseline='bottom';
+  ctx.fillText('Creativo AI',W-18,H-12);
+  canvas.toBlob(function(b){ _aiBlob=b; window._thumbnailFile=new File([b],'ai-thumb.png',{type:'image/png'}); },'image/png');
+}
+
+function rrect(ctx,x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y);
+  ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r);
+  ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h);
+  ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r);
+  ctx.quadraticCurveTo(x,y,x+r,y);
+  ctx.closePath();
+}
+
+function useAIThumb(){
+  var canvas=document.getElementById('aiCanvas');
+  function saveAndApply(blob){
+    window._thumbnailFile=new File([blob],'ai-thumb.png',{type:'image/png'});
+    window._aiThumbOverride=true;
+    var url=canvas.toDataURL('image/png');
+    var zone=document.getElementById('thumbnailZone');
+    if(zone) zone.innerHTML='<img src="'+url+'" style="max-height:130px;border-radius:8px;object-fit:contain;display:block;margin:0 auto"><p style="margin-top:6px;font-size:11px;color:var(--text-muted)">AI Thumbnail PNG <span onclick=\"clearThumbnail(event)\" style=\"color:var(--orange);cursor:pointer;margin-left:8px\">Remove</span></p>';
+    document.getElementById('aiUsedBadge').style.display='block';
+    showToast('AI Thumbnail set!');
+  }
+  if(_aiBlob) saveAndApply(_aiBlob);
+  else canvas.toBlob(function(b){saveAndApply(b);},'image/png');
+}
+
+// ── DASHBOARD TABS ──────────────────────────────────────────
 function switchDashTab(tab, el){
   document.querySelectorAll('.dash-nav li').forEach(l=>l.classList.remove('active'));
-  el.classList.add('active');
+  if(el && el.closest('.dash-nav')) el.classList.add('active');
   document.querySelectorAll('.dash-tab-content').forEach(c=>c.classList.remove('active'));
   const map={overview:'dashTabOverview',projects:'dashTabProjects',inquiries:'dashTabInquiriesContent',admin:'dashTabAdmin'};
   if(map[tab]) document.getElementById(map[tab]).classList.add('active');
@@ -2563,6 +3378,76 @@ function switchDashTab(tab, el){
   if((tab==='projects'||tab==='overview')&&window.loadDashboard) window.loadDashboard();
   if(tab==='admin') loadAdminPanel();
 }
+
+function dmtSetActive(name){
+  document.querySelectorAll('.dmt-btn').forEach(b=>b.classList.remove('active'));
+  const el = document.getElementById('dmt-'+name);
+  if(el) el.classList.add('active');
+}
+
+// ── MOBILE BOTTOM NAV ─────────────────────────────────────
+function mbnSetActive(name){
+  document.querySelectorAll('.mbn-item').forEach(b=>b.classList.remove('active'));
+  const el = document.getElementById('mbn-'+name);
+  if(el) el.classList.add('active');
+  // sync desktop nav active state
+  document.querySelectorAll('.nav-links a').forEach(a=>a.classList.remove('active'));
+  const pageMap = {discover:0, creatives:1, jobs:2};
+  if(pageMap[name]!==undefined){
+    const links=document.querySelectorAll('.nav-links a');
+    if(links[pageMap[name]]) links[pageMap[name]].classList.add('active');
+  }
+}
+
+function mbnUploadTap(){
+  if(!window.CU){ openModal('auth'); return; }
+  openModal('upload');
+}
+
+function mbnProfileTap(){
+  if(!window.CU){ openModal('auth'); return; }
+  showPage('dashboard');
+  if(window.loadDashboard) loadDashboard();
+  mbnSetActive('profile');
+}
+
+// Update bottom nav profile icon & label when auth changes
+function updateMobileBottomNav(){
+  const iconWrap = document.getElementById('mbnProfileIcon');
+  const label    = document.getElementById('mbnProfileLabel');
+  if(!iconWrap || !label) return;
+
+  if(window.CU && window.CUD){
+    label.textContent = window.CUD.firstName || 'Me';
+    if(window.CUD.avatarURL){
+      iconWrap.style.background = 'transparent';
+      iconWrap.innerHTML = `<img src="${window.CUD.avatarURL}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;border:2px solid var(--orange);display:block;">`;
+    } else {
+      const ini = ((window.CUD.firstName?.[0]||'')+(window.CUD.lastName?.[0]||'')).toUpperCase() || '?';
+      const bg  = window.CUD.avatarColor || '#FF5C00';
+      iconWrap.style.background = bg;
+      iconWrap.innerHTML = `<div style="width:28px;height:28px;border-radius:50%;background:${bg};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:white;border:2px solid var(--orange);box-sizing:border-box;">${ini}</div>`;
+    }
+  } else {
+    label.textContent = 'Profile';
+    iconWrap.style.background = 'transparent';
+    iconWrap.innerHTML = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-muted)">
+      <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+    </svg>`;
+  }
+}
+
+// Sync bottom nav active state with showPage calls
+const _origShowPage = window.showPage || function(){};
+window.showPage = function(name){
+  _origShowPage(name);
+  const nameMap = {discover:'discover',creatives:'creatives',jobs:'jobs',dashboard:'profile',profile:'profile'};
+  if(nameMap[name]) mbnSetActive(nameMap[name]);
+};
+
+// Hook into auth state to update bottom nav
+const _origUpdateNavLoggedIn = window.updateNavLoggedIn;
+document.addEventListener('_navUpdated', updateMobileBottomNav);
 </script>
 </body>
 </html>
