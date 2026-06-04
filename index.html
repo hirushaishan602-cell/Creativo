@@ -31,15 +31,29 @@ let CU = null;
 let CUD = null;
 let unsubInquiries = null;
 
+// Admin check: Firestore 'admins' collection OR legacy hardcoded UID
 const ADMIN_UIDS = ['5Tp9xmfgY4MofJOP88S29RNYTyH3'];
-function isAdmin(){ return CU && ADMIN_UIDS.includes(CU.uid); }
+let _isAdminCached = false;
 
+async function checkAdminStatus(uid){
+  if(!uid) return false;
+  if(ADMIN_UIDS.includes(uid)) return true;
+  try{
+    const snap = await getDoc(doc(db,'admins',uid));
+    return snap.exists() && snap.data().active === true;
+  }catch(e){ return false; }
+}
+
+function isAdmin(){ return _isAdminCached; }
+
+let _deepLinkHandled = false;
 onAuthStateChanged(auth, async (user) => {
   if (user) {
     CU = user; window.CU = user;
     const snap = await getDoc(doc(db,"users",user.uid));
     CUD = snap.exists() ? snap.data() : {};
     window.CUD = CUD;
+    _isAdminCached = await checkAdminStatus(user.uid);
     updateNavLoggedIn();
     if(document.getElementById('page-dashboard').classList.contains('active')) loadDashboard();
     if(document.getElementById('page-jobs').classList.contains('active')) loadJobs();
@@ -47,9 +61,17 @@ onAuthStateChanged(auth, async (user) => {
   } else {
     CU = null; CUD = null;
     window.CU = null; window.CUD = null;
+    _isAdminCached = false;
     updateNavLoggedOut();
     if(unsubInquiries){ unsubInquiries(); unsubInquiries=null; }
     document.getElementById('notifDot').style.display='none';
+  }
+  // Handle ?user= deep link once after first auth resolve
+  if(!_deepLinkHandled){
+    _deepLinkHandled = true;
+    const params = new URLSearchParams(location.search);
+    const uid = params.get('user');
+    if(uid) viewFirebaseProfile(uid);
   }
 });
 
@@ -343,13 +365,19 @@ window.loadPublicProjects = async function(category='all'){
     }));
     projects.forEach(p=>{
       if(p.authorId && userMap[p.authorId]){
-        p.authorVerified  = userMap[p.authorId].verified   || false;
-        p.authorIsPro     = userMap[p.authorId].isPro      || false;
-        p.authorTitleBadge= userMap[p.authorId].titleBadge || '';
+        p.authorVerified    = userMap[p.authorId].verified     || false;
+        p.authorIsPro       = userMap[p.authorId].isPro        || false;
+        p.authorTitleBadge  = userMap[p.authorId].titleBadge   || '';
+        p.authorNameStyle   = userMap[p.authorId].nameStyle    || 'default';
+        p.authorProfileFrame= userMap[p.authorId].profileFrame || 'none';
       }
     });
     const bgs=['linear-gradient(135deg,#f093fb,#f5576c)','linear-gradient(135deg,#4facfe,#00f2fe)','linear-gradient(135deg,#43e97b,#38f9d7)','linear-gradient(135deg,#fa709a,#fee140)','linear-gradient(135deg,#a18cd1,#fbc2eb)','linear-gradient(135deg,#667eea,#764ba2)','linear-gradient(135deg,#f7971e,#ffd200)'];
     grid.innerHTML=projects.map((p,i)=>projectCard(p,bgs[i%bgs.length])).join('');
+    projects.forEach(p=>{
+      const sp=document.getElementById('pn_'+p.id);
+      if(sp) renderProName(sp, p.authorName||'Creative', p.authorIsPro, p.authorNameStyle||'default');
+    });
     loadUserLikes();
   }catch(e){grid.innerHTML=emptyState('⚠️','Could not load projects','Check your connection and try again.');}
 };
@@ -394,9 +422,16 @@ function projectCard(p,bg,isOwn){
         <span class="badge badge-gray" style="font-size:10px;cursor:pointer" title="Browse ${p.category}" onclick="event.stopPropagation();filterProjects('${(p.category||'Design').replace(/'/g,"\\'")}',null)">${p.category||'Design'}</span>
       </div>
       <div class="portfolio-creator">
-        <div class="avatar" style="${avatarStyle};width:26px;height:26px;font-size:10px">${avatarContent}</div>
+        ${(()=>{
+          const _fk = p.authorProfileFrame;
+          const _fr = (p.authorIsPro && _fk && _fk!=='none') ? PRO_FRAMES[_fk] : null;
+          if(_fr && _fr.css){
+            return `<div style="${_fr.css}width:32px;height:32px;border-radius:50%;display:inline-flex;overflow:hidden;flex-shrink:0"><div style="margin:2px;width:28px;height:28px;border-radius:50%;${avatarStyle};display:flex;align-items:center;justify-content:center;font-size:10px;color:white;font-weight:700">${avatarContent}</div></div>`;
+          }
+          return `<div class="avatar" style="${avatarStyle};width:26px;height:26px;font-size:10px">${avatarContent}</div>`;
+        })()}
         <div style="display:flex;flex-direction:column;gap:3px">
-          <div class="creator-name" style="display:flex;align-items:center;gap:4px">${p.authorName||'Creative'} ${verifiedBadge} ${proBadge}</div>
+          <div class="creator-name" style="display:flex;align-items:center;gap:4px"><span id="pn_${p.id}" data-name="${p.authorName||'Creative'}" data-pro="${p.authorIsPro?'1':''}" data-style="${p.authorNameStyle||'default'}">${p.authorName||'Creative'}</span> ${verifiedBadge} ${proBadge}</div>
           ${titleBadgeHtml}
         </div>
       </div>
@@ -491,11 +526,21 @@ window.loadPublicCreatives = async function(type='all'){
     if(users.length===0){grid.innerHTML=emptyState('👥','No creatives yet','Be the first to join!');return;}
     grid.innerHTML=users.map(c=>{
       const ini=(c.firstName?.[0]||'')+(c.lastName?.[0]||'');
+      const hasFr = c.isPro && c.profileFrame && c.profileFrame!=='none';
+      const fr = hasFr ? PRO_FRAMES[c.profileFrame] : null;
+      const avatarContent = c.avatarURL ? `<img src="${c.avatarURL}" style="width:100%;height:100%;object-fit:cover">` : (ini||'?');
+      const avatarBg = c.avatarURL ? 'transparent' : (c.avatarColor||'#6B4EFF');
+      let avatarHTML;
+      if(hasFr && fr && fr.css){
+        avatarHTML = `<div style="${fr.css}width:70px;height:70px;border-radius:50%;display:inline-flex;overflow:hidden;margin:0 auto 12px"><div style="margin:3px;width:64px;height:64px;border-radius:50%;background:${avatarBg};display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;color:#fff;overflow:hidden">${avatarContent}</div></div>`;
+      } else {
+        avatarHTML = `<div class="profile-avatar-big" style="background:${avatarBg}">${avatarContent}</div>`;
+      }
       return `<div class="profile-card" onclick="viewFirebaseProfile('${c.id}')">
         ${c.verified?'<div class="verified-badge"><svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="white"/></svg></div>':''}
         ${c.isPro?'<div style="position:absolute;top:12px;left:12px;background:var(--orange);color:white;font-size:10px;font-weight:700;padding:2px 8px;border-radius:100px">PRO</div>':''}
-        <div class="profile-avatar-big" style="background:${c.avatarURL?'transparent':c.avatarColor||'#6B4EFF'}">${c.avatarURL?`<img src="${c.avatarURL}" style="width:100%;height:100%;object-fit:cover">`:ini||'?'}</div>
-        <div class="profile-name">${c.firstName||''} ${c.lastName||''}</div>
+        ${avatarHTML}
+        <div class="profile-name" id="cn_${c.id}" data-name="${(c.firstName||'')+' '+(c.lastName||'')}" data-pro="${c.isPro?'1':''}" data-style="${c.nameStyle||'default'}">${c.firstName||''} ${c.lastName||''}</div>
         <div class="profile-role">${c.role||''}</div>
         <div class="profile-location">📍 ${c.location||'Sri Lanka'}</div>
         <div class="profile-tags">
@@ -509,6 +554,10 @@ window.loadPublicCreatives = async function(type='all'){
         </div>
       </div>`;
     }).join('');
+    users.forEach(c=>{
+      const sp=document.getElementById('cn_'+c.id);
+      if(sp) renderProName(sp, ((c.firstName||'')+' '+(c.lastName||'')).trim(), c.isPro, c.nameStyle||'default');
+    });
   }catch(e){grid.innerHTML='<div style="text-align:center;padding:40px;color:var(--text-muted)">Could not load creatives.</div>';}
 };
 
@@ -552,8 +601,31 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
       pvAv.innerHTML=`<img src="${u.avatarURL}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
       pvAv.style.background='transparent';
     } else { pvAv.innerHTML=ini||'?'; pvAv.style.background=u.avatarColor||'#6B4EFF'; }
+    // Apply pro frame if set
+    if(u.isPro && u.profileFrame && u.profileFrame!=='none'){
+      const fr=PRO_FRAMES[u.profileFrame];
+      if(fr&&fr.css){
+        pvAv.style.cssText='';
+        pvAv.style.width='88px'; pvAv.style.height='88px'; pvAv.style.fontSize='32px';
+        pvAv.style.borderRadius='50%'; pvAv.style.border='none';
+        const frameWrap=document.createElement('div');
+        frameWrap.className='pf-wrap';
+        frameWrap.style.cssText=fr.css+`width:98px;height:98px;flex-shrink:0;`;
+        const inner=document.createElement('div');
+        inner.className='pf-inner';
+        inner.style.cssText='margin:3px;width:88px;height:88px;display:flex;align-items:center;justify-content:center;';
+        const pvAvParent=pvAv.parentNode;
+        pvAvParent.insertBefore(frameWrap, pvAv);
+        pvAv.style.borderRadius='50%';
+        inner.appendChild(pvAv);
+        frameWrap.appendChild(inner);
+      }
+    } else {
+      pvAv.style.border='4px solid var(--surface)';
+    }
     document.getElementById('pvAvatarEditBtn').style.display=selfView?'flex':'none';
-    document.getElementById('pvName').textContent=`${u.firstName||''} ${u.lastName||''}`.trim();
+    const fullName=`${u.firstName||''} ${u.lastName||''}`.trim();
+    renderProName(document.getElementById('pvName'), fullName, u.isPro, u.nameStyle);
     document.getElementById('pvProBadge').style.display=u.isPro?'inline-flex':'none';
     document.getElementById('pvVerifiedBadge').style.display=u.verified?'inline-flex':'none';
     document.getElementById('pvRole').textContent=u.role||'Creative';
@@ -564,7 +636,7 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
     document.getElementById('pvTags').innerHTML=
       (u.titleBadge ? `<span style="display:inline-flex;align-items:center;padding:4px 14px;border-radius:100px;font-size:11px;font-weight:700;background:linear-gradient(135deg,#b8860b,#ffd700,#b8860b);color:#1a1000;letter-spacing:0.6px;border:1px solid rgba(255,215,0,0.7);box-shadow:0 0 10px rgba(255,215,0,0.3)">⭐ ${u.titleBadge}</span>` : '') +
       (u.tags||[]).map(t=>`<span class="badge badge-gray">${t}</span>`).join('');
-    document.getElementById('pvSkills').innerHTML=(u.skills||[]).map(s=>`<span class="badge badge-purple">${s}</span>`).join('');
+    document.getElementById('pvSkills').innerHTML=(u.skills||[]).map(s=>skillBadge(s)).join('');
     const sl=u.socialLinks||{};
     const socEl=document.getElementById('pvSocial');
     socEl.innerHTML='';
@@ -648,8 +720,18 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
 };
 
 window.copyPortfolioLink = function(uid){
-  const url=`${location.origin}${location.pathname}#portfolio/${uid}`;
+  const url=`${location.origin}${location.pathname}?user=${uid}`;
   navigator.clipboard.writeText(url).then(()=>showToast('🔗 Portfolio link copied!')).catch(()=>showToast('Copy failed'));
+};
+
+// Handle direct portfolio link: ?user=UID
+window._handlePortfolioDeepLink = function(){
+  const params = new URLSearchParams(location.search);
+  const uid = params.get('user');
+  if(uid){
+    // Wait a tick so auth state & UI is ready
+    setTimeout(()=>{ viewFirebaseProfile(uid); }, 400);
+  }
 };
 
 window.openMediaViewer = function(coverURL, title, description, likes, views){
@@ -912,6 +994,88 @@ window.doApplyJob = async function(){
   }
 };
 
+function buildNameStylePicker(isPro, currentStyle){
+  const picker = document.getElementById('epNameStylePicker');
+  const lock = document.getElementById('epNameStyleLock');
+  const badge = document.getElementById('epNameStyleProBadge');
+  if(!picker) return;
+  if(!isPro){
+    picker.style.display = 'none';
+    lock.style.display = 'block';
+    return;
+  }
+  picker.style.display = 'grid';
+  lock.style.display = 'none';
+  badge.style.display = 'none';
+  const sk = currentStyle || 'default';
+  const _isPro = isPro; const _sk = sk;
+  picker.innerHTML = Object.keys(NAME_STYLES).map(k=>{
+    const ns = NAME_STYLES[k];
+    const isActive = k === sk;
+    const nameDemo = (window.CUD?.firstName||'Your')+' '+(window.CUD?.lastName||'Name');
+    return `<div onclick="selectNameStyle('${k}',this)" data-style="${k}"
+      style="background:${isActive?'rgba(168,85,247,0.18)':'var(--surface2)'};border:1.5px solid ${isActive?'rgba(168,85,247,0.6)':'var(--border)'};border-radius:10px;padding:10px 12px;cursor:pointer;transition:all .15s;display:flex;flex-direction:column;gap:6px;align-items:flex-start;overflow:hidden">
+      <span id="nsp-${k}" style="font-size:13px;font-weight:700;font-family:var(--font-display);display:inline-block;white-space:nowrap;overflow:hidden;max-width:100%">${nameDemo}</span>
+      <span style="font-size:10px;color:var(--text-muted)">${ns.label}</span>
+    </div>`;
+  }).join('');
+  // render animations in picker cards
+  Object.keys(NAME_STYLES).forEach(k=>{
+    const sp = document.getElementById('nsp-'+k);
+    if(sp){
+      const nameDemo2 = (window.CUD?.firstName||'Your')+' '+(window.CUD?.lastName||'Name');
+      renderProName(sp, nameDemo2, true, k);
+    }
+  });
+}
+
+window.selectNameStyle = function(styleKey, el){
+  window._editNameStyle = styleKey;
+  document.querySelectorAll('#epNameStylePicker [data-style]').forEach(e=>{
+    const isActive = e.dataset.style === styleKey;
+    e.style.background = isActive ? 'rgba(168,85,247,0.18)' : 'var(--surface2)';
+    e.style.border = '1.5px solid ' + (isActive ? 'rgba(168,85,247,0.6)' : 'var(--border)');
+  });
+  updateProfilePreview();
+};
+
+function buildFramePicker(isPro, currentFrame){
+  const section = document.getElementById('epFrameSection');
+  const picker  = document.getElementById('epFramePicker');
+  const lock    = document.getElementById('epFrameLock');
+  if(!section || !picker) return;
+  if(!isPro){
+    picker.style.display = 'none';
+    if(lock) lock.style.display = 'block';
+    return;
+  }
+  picker.style.display = 'grid';
+  if(lock) lock.style.display = 'none';
+  const cf = currentFrame || 'none';
+  picker.innerHTML = Object.keys(PRO_FRAMES).map(k=>{
+    const fr = PRO_FRAMES[k];
+    const isActive = k === cf;
+    const previewRing = fr.css
+      ? `<div style="${fr.css}width:44px;height:44px;border-radius:50%;display:inline-flex;overflow:hidden;flex-shrink:0"><div style="margin:3px;width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,#6B4EFF,#FF5C00);display:flex;align-items:center;justify-content:center;font-size:16px">✨</div></div>`
+      : `<div style="width:44px;height:44px;border-radius:50%;border:2px dashed var(--border2);display:inline-flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">✨</div>`;
+    return `<div onclick="selectFrame('${k}',this)" data-frame="${k}"
+      style="background:${isActive?'rgba(255,92,0,0.15)':'var(--surface2)'};border:1.5px solid ${isActive?'rgba(255,92,0,0.6)':'var(--border)'};border-radius:10px;padding:8px 10px;cursor:pointer;transition:all .15s;display:flex;align-items:center;gap:8px;overflow:hidden">
+      ${previewRing}
+      <span style="font-size:11px;font-weight:600;color:var(--text)">${fr.label}</span>
+    </div>`;
+  }).join('');
+}
+
+window.selectFrame = function(frameKey, el){
+  window._editProfileFrame = frameKey;
+  document.querySelectorAll('#epFramePicker [data-frame]').forEach(e=>{
+    const isActive = e.dataset.frame === frameKey;
+    e.style.background = isActive ? 'rgba(255,92,0,0.15)' : 'var(--surface2)';
+    e.style.border = '1.5px solid ' + (isActive ? 'rgba(255,92,0,0.6)' : 'var(--border)');
+  });
+  updateProfilePreview();
+};
+
 window.openEditProfile = function(){
   if(!CU){openModal('auth');return;}
   document.getElementById('ep_firstName').value=CUD?.firstName||'';
@@ -944,6 +1108,10 @@ window.openEditProfile = function(){
       picPreview.style.background=CUD?.avatarColor||'#FF5C00';
     }
   }
+  window._editNameStyle = CUD?.nameStyle || 'default';
+  window._editProfileFrame = CUD?.profileFrame || 'none';
+  buildNameStylePicker(CUD?.isPro, window._editNameStyle);
+  buildFramePicker(CUD?.isPro, window._editProfileFrame);
   openModal('editprofile');
   updateProfilePreview();
 };
@@ -957,31 +1125,60 @@ window.updateProfilePreview = function(){
   const tags=(v('ep_tags')||'').split(',').map(t=>t.trim()).filter(Boolean);
   const skills=(v('ep_skills')||'').split(',').map(s=>s.trim()).filter(Boolean);
   const ini=((fn[0]||'')+(ln[0]||'')).toUpperCase();
-  const pa=document.getElementById('prevAvatar');
   const avatarURL = window._newAvatarURL || CUD?.avatarURL;
-  if(avatarURL){
-    pa.textContent='';
-    pa.style.background='transparent';
-    pa.style.backgroundImage=`url(${avatarURL})`;
-    pa.style.backgroundSize='cover';
-    pa.style.backgroundPosition='center';
-  } else {
-    pa.textContent=ini||'?';
-    pa.style.backgroundImage='';
-    pa.style.background=CUD?.avatarColor||'#FF5C00';
+  const isPro = CUD?.isPro;
+  const frameKey = window._editProfileFrame || CUD?.profileFrame || 'none';
+  const fr = (isPro && frameKey!=='none') ? PRO_FRAMES[frameKey] : null;
+
+  // Build avatar preview with optional frame — always rebuild fresh to avoid stale refs
+  const avatarContainer = document.getElementById('prevAvatarWrap');
+  if(avatarContainer){
+    avatarContainer.innerHTML = '';
+    if(fr && fr.css){
+      const wrap = document.createElement('div');
+      wrap.style.cssText = fr.css + 'width:68px;height:68px;border-radius:50%;display:inline-flex;overflow:hidden;margin:0 auto 12px;';
+      const inner = document.createElement('div');
+      inner.style.cssText = 'margin:3px;width:62px;height:62px;border-radius:50%;overflow:hidden;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:20px;font-weight:700;color:white;font-family:var(--font-display);';
+      if(avatarURL){
+        inner.style.backgroundImage = 'url('+avatarURL+')';
+        inner.style.backgroundSize = 'cover';
+        inner.style.backgroundPosition = 'center';
+      } else {
+        inner.style.background = CUD?.avatarColor||'#FF5C00';
+        inner.textContent = ini||'?';
+      }
+      wrap.appendChild(inner);
+      avatarContainer.appendChild(wrap);
+    } else {
+      const pa = document.createElement('div');
+      pa.id = 'prevAvatar';
+      pa.className = 'preview-avatar';
+      pa.style.cssText = 'width:56px;height:56px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:white;margin:0 auto 12px;';
+      if(avatarURL){
+        pa.style.background = 'transparent';
+        pa.style.backgroundImage = 'url('+avatarURL+')';
+        pa.style.backgroundSize = 'cover';
+        pa.style.backgroundPosition = 'center';
+      } else {
+        pa.textContent = ini||'?';
+        pa.style.background = CUD?.avatarColor||'#FF5C00';
+      }
+      avatarContainer.appendChild(pa);
+    }
   }
-  document.getElementById('prevName').textContent=`${fn} ${ln}`;
+
+  const prevNameEl = document.getElementById('prevName');
+  const pickedStyle = window._editNameStyle || CUD?.nameStyle || 'default';
+  renderProName(prevNameEl, `${fn} ${ln}`, CUD?.isPro, pickedStyle);
   document.getElementById('prevRole').textContent=`${role} · ${loc}`;
   document.getElementById('prevBio').textContent=bio;
-  document.getElementById('prevTags').innerHTML=tags.map(t=>`<span class="badge badge-gray">${t}</span>`).join('');
   // Show gold title badge in preview if set
   const titleBadge = CUD?.titleBadge||'';
   const prevTagsEl = document.getElementById('prevTags');
   prevTagsEl.innerHTML =
     (titleBadge ? `<span style="display:inline-flex;align-items:center;padding:4px 14px;border-radius:100px;font-size:11px;font-weight:700;background:linear-gradient(135deg,#b8860b,#ffd700,#b8860b);color:#1a1000;letter-spacing:0.6px;border:1px solid rgba(255,215,0,0.7);box-shadow:0 0 10px rgba(255,215,0,0.3)">⭐ ${titleBadge}</span>` : '') +
     tags.map(t=>`<span class="badge badge-gray">${t}</span>`).join('');
-  document.getElementById('prevSkills').innerHTML=skills.map(s=>`<span class="badge badge-purple">${s}</span>`).join('');
-  const isPro=CUD?.isPro;
+  document.getElementById('prevSkills').innerHTML=skills.map(s=>skillBadge(s)).join('');
   const sl_instagram=v('ep_instagram');
   document.getElementById('prevSocialLinks').innerHTML=isPro&&sl_instagram?`<span class="badge badge-orange">📸 Instagram</span>`:(isPro?'':`<span style="font-size:11px;color:var(--orange)">🔒 Social links — Pro only</span>`);
 };
@@ -1018,7 +1215,7 @@ window.doSaveProfile = async function(){
     youtube:v('ep_youtube'),behance:v('ep_behance'),
     tiktok:v('ep_tiktok'),website:v('ep_website')
   }:CUD?.socialLinks||{};
-  const updateData={firstName:fn,lastName:ln,role,location:loc,bio:v('ep_bio'),tags,skills,socialLinks};
+  const updateData={firstName:fn,lastName:ln,role,location:loc,bio:v('ep_bio'),tags,skills,socialLinks,nameStyle:window._editNameStyle||'default',profileFrame:window._editProfileFrame||'none'};
   if(window._newAvatarURL) updateData.avatarURL = window._newAvatarURL;
   try{
     await updateDoc(doc(db,"users",CU.uid),updateData);
@@ -1162,8 +1359,12 @@ async function loadAdminPanel(){
   const el = document.getElementById('adminUsersList');
   el.innerHTML = '<div style="text-align:center;padding:32px;color:var(--text-muted);font-size:13px">⏳ Loading...</div>';
   try{
-    const snap = await getDocs(query(collection(db,'users'), orderBy('createdAt','desc')));
-    _allUsers = snap.docs.map(d=>({id:d.id,...d.data()}));
+    const [snap, adminSnap] = await Promise.all([
+      getDocs(query(collection(db,'users'), orderBy('createdAt','desc'))),
+      getDocs(collection(db,'admins'))
+    ]);
+    const adminUIDs = new Set([...ADMIN_UIDS, ...adminSnap.docs.filter(d=>d.data().active).map(d=>d.id)]);
+    _allUsers = snap.docs.map(d=>({id:d.id,...d.data(), isAdmin: adminUIDs.has(d.id)}));
     const searchBox = document.getElementById('adminSearchInput');
     if(searchBox) searchBox.value = '';
     const countEl = document.getElementById('adminUserCount');
@@ -1187,6 +1388,8 @@ function renderAdminUsers(users){
     const ini  = ((u.firstName||'')[0]||'') + ((u.lastName||'')[0]||'');
     const isVer = !!u.verified;
     const isPro = !!u.isPro;
+    const isAdminUser = ADMIN_UIDS.includes(u.id) || !!u.isAdmin;
+    const isSelf = CU && u.id === CU.uid;
     return `<div style="background:var(--surface2);border:1px solid ${isVer?'rgba(59,130,246,0.35)':isPro?'rgba(255,92,0,0.25)':'var(--border)'};border-radius:12px;padding:14px 16px">
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
         <div style="width:44px;height:44px;border-radius:50%;background:${u.avatarColor||'#6B4EFF'};display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:white;flex-shrink:0;overflow:hidden;border:2px solid ${isVer?'#3b82f6':isPro?'var(--orange)':'transparent'}">
@@ -1197,6 +1400,7 @@ function renderAdminUsers(users){
             ${name}
             ${isVer?'<span style="background:#3b82f6;border-radius:50%;width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="9" height="9"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="white"/></svg></span>':''}
             ${isPro?'<span style="background:var(--orange);color:white;border-radius:4px;padding:1px 6px;font-size:9px;font-weight:700">PRO</span>':''}
+            ${isAdminUser?'<span style="background:#7c3aed;color:white;border-radius:4px;padding:1px 6px;font-size:9px;font-weight:700">ADMIN</span>':''}
           </div>
           <div style="font-size:12px;color:var(--text-muted);margin-top:3px">${u.email||'—'}</div>
           <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${u.role||'—'} · 📁 ${u.projectCount||0} projects · 👁 ${u.profileViews||0} views</div>
@@ -1211,6 +1415,10 @@ function renderAdminUsers(users){
             : `<button onclick="adminTogglePro('${u.id}',true)"  style="background:rgba(255,92,0,0.15);color:var(--orange);border:1px solid rgba(255,92,0,0.3);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">⭐ Give Pro</button>`
           }
           <button onclick="adminSetTitleBadge('${u.id}','${(u.titleBadge||'').replace(/'/g,"\\'")}','${name.replace(/'/g,"\\'")}')" style="background:linear-gradient(135deg,rgba(184,134,11,0.2),rgba(255,215,0,0.15));color:#ffd700;border:1px solid rgba(255,215,0,0.4);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">🏅 ${u.titleBadge?`"${u.titleBadge}"`:' Title Badge'}</button>
+          ${!isSelf ? (isAdminUser
+            ? `<button onclick="adminToggleAdmin('${u.id}',false,'${name.replace(/'/g,"\\'")}')" style="background:rgba(124,58,237,0.15);color:#a78bfa;border:1px solid rgba(124,58,237,0.35);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">👑 Remove Admin</button>`
+            : `<button onclick="adminToggleAdmin('${u.id}',true,'${name.replace(/'/g,"\\'")}')"  style="background:rgba(124,58,237,0.2);color:#a78bfa;border:1px solid rgba(124,58,237,0.4);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">👑 Make Admin</button>`
+          ) : '<span style="font-size:11px;color:var(--text-muted);padding:6px 8px">You</span>'}
         </div>
       </div>
     </div>`;
@@ -1255,6 +1463,141 @@ window.adminTogglePro = async function(uid, give){
   }catch(e){ showToast('❌ '+e.message); }
 };
 
+window.adminSetNameStyle = async function(uid, currentStyle, userName){
+  if(!isAdmin()){ showToast('Admin access naha'); return; }
+  // Build picker modal HTML
+  const styles = NAME_STYLES;
+  const opts = Object.keys(styles).map(k=>{
+    const ns=styles[k];
+    const isActive = k===(currentStyle||'default');
+    return `<div onclick="document.querySelectorAll('.ns-opt').forEach(e=>{e.style.background='var(--surface2)';e.style.borderColor='var(--border)';});this.style.background='rgba(168,85,247,0.15)';this.style.borderColor='rgba(168,85,247,0.5)';window._pickedStyle='${k}'" 
+      class="ns-opt" 
+      style="background:${isActive?'rgba(168,85,247,0.15)':'var(--surface2)'};border:1px solid ${isActive?'rgba(168,85,247,0.5)':'var(--border)'};border-radius:10px;padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:12px;transition:all .15s;overflow:hidden">
+      <span id="ansp-${k}" style="font-size:15px;font-weight:700;font-family:var(--font-display);display:inline-block;white-space:nowrap;overflow:hidden;max-width:200px">${userName}</span>
+      <span style="margin-left:auto;font-size:11px;color:var(--text-muted);flex-shrink:0">${ns.label}</span>
+    </div>`;
+  }).join('');
+  
+  // Create/reuse overlay
+  let ov = document.getElementById('nameStyleOverlay');
+  if(!ov){
+    ov = document.createElement('div');
+    ov.id = 'nameStyleOverlay';
+    ov.style.cssText='position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.7);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:16px';
+    document.body.appendChild(ov);
+  }
+  window._pickedStyle = currentStyle||'default';
+  window._nameStyleUID = uid;
+  window._nameStyleUser = userName;
+  ov.innerHTML=`<div style="background:var(--surface);border:1px solid var(--border2);border-radius:20px;width:100%;max-width:460px;max-height:85vh;overflow-y:auto;padding:24px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+      <div style="font-family:var(--font-display);font-size:18px;font-weight:800;color:var(--text)">Name Style</div>
+      <button onclick="document.getElementById('nameStyleOverlay').style.display='none'" style="background:var(--surface2);border:1px solid var(--border2);border-radius:50%;width:30px;height:30px;cursor:pointer;color:var(--text-muted);font-size:14px">✕</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">${userName} ge profile name eka customize karanna. Pro users walata only widihata show wena.</div>
+    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:20px">${opts}</div>
+    <button onclick="applyNameStyle()" style="width:100%;background:linear-gradient(90deg,#a855f7,#ec4899);color:white;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer">✨ Apply Style</button>
+  </div>`;
+  ov.style.display='flex';
+  // render animated previews in admin popup
+  setTimeout(()=>{
+    Object.keys(NAME_STYLES).forEach(k=>{
+      const sp=document.getElementById('ansp-'+k);
+      if(sp) renderProName(sp, userName, true, k);
+    });
+  }, 30);
+};
+
+window.applyNameStyle = async function(){
+  const uid=window._nameStyleUID;
+  const sk=window._pickedStyle||'default';
+  const userName=window._nameStyleUser||'';
+  if(!uid) return;
+  try{
+    await updateDoc(doc(db,'users',uid),{nameStyle:sk});
+    const idx=_allUsers.findIndex(u=>u.id===uid);
+    if(idx>-1) _allUsers[idx].nameStyle=sk;
+    window.adminSearchUsers(document.getElementById('adminSearchInput')?.value||'');
+    document.getElementById('nameStyleOverlay').style.display='none';
+    showToast('✨ Name style set: '+(NAME_STYLES[sk]?.label||sk));
+  }catch(e){ showToast('Error: '+e.message); }
+};
+
+window.adminSetFrame = async function(uid, currentFrame, userName){
+  if(!isAdmin()){ showToast('❌ Admin access naha'); return; }
+  const frames = PRO_FRAMES;
+  const opts = Object.keys(frames).map(k=>{
+    const fr=frames[k];
+    const isActive = k===(currentFrame||'none');
+    const previewCss = fr.css ? fr.css+`width:52px;height:52px;` : '';
+    return `<div onclick="document.querySelectorAll('.pf-opt').forEach(e=>{e.style.background='var(--surface2)';e.style.borderColor='var(--border)';});this.style.background='rgba(255,92,0,0.15)';this.style.borderColor='rgba(255,92,0,0.5)';window._pickedFrame='${k}'"
+      class="pf-opt"
+      style="background:${isActive?'rgba(255,92,0,0.15)':'var(--surface2)'};border:1px solid ${isActive?'rgba(255,92,0,0.5)':'var(--border)'};border-radius:10px;padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:12px;transition:all .15s">
+      <div style="${previewCss}${fr.css?'border-radius:50%;display:inline-flex;overflow:hidden;':''}">
+        ${fr.css ? `<div style="margin:3px;width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#6B4EFF,#FF5C00);display:flex;align-items:center;justify-content:center;font-size:18px">✨</div>` : `<div style="width:46px;height:46px;border-radius:50%;background:var(--surface3);display:flex;align-items:center;justify-content:center;font-size:18px">✨</div>`}
+      </div>
+      <span style="font-size:13px;font-weight:600;color:var(--text)">${fr.label}</span>
+      ${isActive?'<span style="margin-left:auto;font-size:10px;color:var(--orange);font-weight:700">Current</span>':''}
+    </div>`;
+  }).join('');
+
+  let ov = document.getElementById('framePickerOverlay');
+  if(!ov){
+    ov = document.createElement('div');
+    ov.id = 'framePickerOverlay';
+    ov.style.cssText='position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.7);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:16px';
+    document.body.appendChild(ov);
+  }
+  window._pickedFrame = currentFrame||'none';
+  window._frameUID = uid;
+  window._frameUser = userName;
+  ov.innerHTML=`<div style="background:var(--surface);border:1px solid var(--border2);border-radius:20px;width:100%;max-width:440px;max-height:85vh;overflow-y:auto;padding:24px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+      <div style="font-family:var(--font-display);font-size:18px;font-weight:800;color:var(--text)">🖼 Profile Frame</div>
+      <button onclick="document.getElementById('framePickerOverlay').style.display='none'" style="background:var(--surface2);border:1px solid var(--border2);border-radius:50%;width:30px;height:30px;cursor:pointer;color:var(--text-muted);font-size:14px">✕</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px">${userName} ge profile avatar eke animated frame eka set karanna. Pro users walata witharak.</div>
+    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:20px">${opts}</div>
+    <button onclick="applyFrame()" style="width:100%;background:linear-gradient(90deg,#ff6a00,#ffd200);color:white;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer">🖼 Apply Frame</button>
+  </div>`;
+  ov.style.display='flex';
+};
+
+window.applyFrame = async function(){
+  const uid=window._frameUID;
+  const fk=window._pickedFrame||'none';
+  const userName=window._frameUser||'';
+  if(!uid) return;
+  try{
+    await updateDoc(doc(db,'users',uid),{profileFrame:fk});
+    const idx=_allUsers.findIndex(u=>u.id===uid);
+    if(idx>-1) _allUsers[idx].profileFrame=fk;
+    window.adminSearchUsers(document.getElementById('adminSearchInput')?.value||'');
+    document.getElementById('framePickerOverlay').style.display='none';
+    showToast('🖼 Frame set: '+(PRO_FRAMES[fk]?.label||fk));
+  }catch(e){ showToast('Error: '+e.message); }
+};
+
+window.adminToggleAdmin = async function(uid, give, userName){
+  if(!isAdmin()){ showToast('❌ Admin access naha'); return; }
+  if(!confirm(give
+    ? `"${userName}" ta Admin access denna? Eka ගිය dudda welaawata oya user API/Firestore access labana.`
+    : `"${userName}" ge Admin access gewanawa?`
+  )) return;
+  try{
+    if(give){
+      await setDoc(doc(db,'admins',uid), {active:true, grantedBy: CU.uid, grantedAt: serverTimestamp()});
+    } else {
+      await deleteDoc(doc(db,'admins',uid));
+    }
+    // Update local cache
+    const idx = _allUsers.findIndex(u=>u.id===uid);
+    if(idx>-1) _allUsers[idx].isAdmin = give;
+    window.adminSearchUsers(document.getElementById('adminSearchInput')?.value||'');
+    showToast(give ? `👑 Admin access dennawa: ${userName}` : `🗑 Admin access genanawa: ${userName}`);
+  }catch(e){ showToast('❌ '+e.message); }
+};
+
 window.adminSetTitleBadge = async function(uid, currentBadge, userName){
   if(!isAdmin()){ showToast('❌ Admin access naha'); return; }
   const input = prompt(`"${userName}" ge Title Badge set karanna:\n(e.g. Founder, CEO, Director)\n\nDaaanna hodath badge remove karanna blank karala OK karanna.`, currentBadge||'');
@@ -1269,7 +1612,202 @@ window.adminSetTitleBadge = async function(uid, currentBadge, userName){
   }catch(e){ showToast('❌ '+e.message); }
 };
 
+
 function v(id){return (document.getElementById(id)?.value||'').trim();}
+
+// PRO NAME RENDERER
+
+// ── SKILL LOGOS ─────────────────────────────────────────────
+const SKILL_LOGOS = {
+  // Adobe
+  'photoshop':      'https://cdn.jsdelivr.net/gh/devicons/devicon/icons/photoshop/photoshop-plain.svg',
+  'illustrator':    'https://cdn.jsdelivr.net/gh/devicons/devicon/icons/illustrator/illustrator-plain.svg',
+  'after effects':  'https://upload.wikimedia.org/wikipedia/commons/c/cb/Adobe_After_Effects_CC_icon.svg',
+  'premiere':       'https://upload.wikimedia.org/wikipedia/commons/4/40/Adobe_Premiere_Pro_CC_icon.svg',
+  'premiere pro':   'https://upload.wikimedia.org/wikipedia/commons/4/40/Adobe_Premiere_Pro_CC_icon.svg',
+  'indesign':       'https://upload.wikimedia.org/wikipedia/commons/4/48/Adobe_InDesign_CC_icon.svg',
+  'lightroom':      'https://upload.wikimedia.org/wikipedia/commons/b/b6/Adobe_Photoshop_Lightroom_CC_logo.svg',
+  'xd':             'https://upload.wikimedia.org/wikipedia/commons/c/c2/Adobe_XD_CC_icon.svg',
+  'adobe xd':       'https://upload.wikimedia.org/wikipedia/commons/c/c2/Adobe_XD_CC_icon.svg',
+  'audition':       'https://upload.wikimedia.org/wikipedia/commons/0/0e/Adobe_Audition_CC_icon_(2020).svg',
+  'dimension':      'https://upload.wikimedia.org/wikipedia/commons/a/af/Adobe_Dimension_CC_icon.svg',
+  'character animator': 'https://upload.wikimedia.org/wikipedia/commons/1/10/Adobe_Character_Animator_CC_icon.svg',
+  'animate':        'https://upload.wikimedia.org/wikipedia/commons/3/33/Adobe_Animate_CC_icon.svg',
+  'dreamweaver':    'https://upload.wikimedia.org/wikipedia/commons/7/75/Adobe_Dreamweaver_CS6_icon.svg',
+  // Figma / Design
+  'figma':          'https://cdn.jsdelivr.net/gh/devicons/devicon/icons/figma/figma-original.svg',
+  'sketch':         'https://upload.wikimedia.org/wikipedia/commons/5/59/Sketch_Logo.svg',
+  'canva':          'https://upload.wikimedia.org/wikipedia/commons/0/08/Canva_icon_2021.svg',
+  'blender':        'https://upload.wikimedia.org/wikipedia/commons/0/0c/Blender_logo_no_text.svg',
+  'cinema 4d':      'https://upload.wikimedia.org/wikipedia/commons/e/ed/Cinema4D_logo_01.png',
+  'c4d':            'https://upload.wikimedia.org/wikipedia/commons/e/ed/Cinema4D_logo_01.png',
+  'davinci resolve':'https://upload.wikimedia.org/wikipedia/commons/9/90/DaVinci_Resolve_17_logo.svg',
+  'davinci':        'https://upload.wikimedia.org/wikipedia/commons/9/90/DaVinci_Resolve_17_logo.svg',
+  'capcut':         'https://upload.wikimedia.org/wikipedia/commons/e/e9/CapCut_Logo.svg',
+  'procreate':      'https://upload.wikimedia.org/wikipedia/commons/4/43/Procreate_Logo.png',
+  'corel draw':     'https://upload.wikimedia.org/wikipedia/commons/4/4a/CorelDRAW_Logo.svg',
+  'coreldraw':      'https://upload.wikimedia.org/wikipedia/commons/4/4a/CorelDRAW_Logo.svg',
+  // Dev tools sometimes used by designers
+  'github':         'https://cdn.jsdelivr.net/gh/devicons/devicon/icons/github/github-original.svg',
+  'vscode':         'https://cdn.jsdelivr.net/gh/devicons/devicon/icons/vscode/vscode-original.svg',
+  'visual studio':  'https://cdn.jsdelivr.net/gh/devicons/devicon/icons/visualstudio/visualstudio-plain.svg',
+  // Social / other creative
+  'wordpress':      'https://cdn.jsdelivr.net/gh/devicons/devicon/icons/wordpress/wordpress-plain.svg',
+  'webflow':        'https://upload.wikimedia.org/wikipedia/commons/9/92/Webflow_logo_2023.svg',
+  'notion':         'https://upload.wikimedia.org/wikipedia/commons/e/e9/Notion-logo.svg',
+  'slack':          'https://cdn.jsdelivr.net/gh/devicons/devicon/icons/slack/slack-original.svg',
+  // Motion / 3D
+  'maya':           'https://upload.wikimedia.org/wikipedia/commons/2/25/Autodesk-Maya-Logo.png',
+  'unreal engine':  'https://upload.wikimedia.org/wikipedia/commons/2/20/UE_Logo_Black_Centered.svg',
+  'unity':          'https://cdn.jsdelivr.net/gh/devicons/devicon/icons/unity/unity-original.svg',
+  'substance':      'https://upload.wikimedia.org/wikipedia/commons/c/c8/Adobe_Substance_3D_Painter_icon.svg',
+  'zbrush':         'https://upload.wikimedia.org/wikipedia/commons/e/e1/Zbrush_logo.svg',
+  // Video
+  'final cut':      'https://upload.wikimedia.org/wikipedia/commons/9/9f/2015_Final_Cut_Pro_Logo.png',
+  'final cut pro':  'https://upload.wikimedia.org/wikipedia/commons/9/9f/2015_Final_Cut_Pro_Logo.png',
+  'vegas pro':      'https://upload.wikimedia.org/wikipedia/commons/0/0c/Vegas_Pro_Logo.svg',
+  'vegas':          'https://upload.wikimedia.org/wikipedia/commons/0/0c/Vegas_Pro_Logo.svg',
+  'obs':            'https://upload.wikimedia.org/wikipedia/commons/1/14/Open_Broadcaster_Software_Logo.png',
+  // Other software seen in creative profiles
+  'antigravity':    '',
+};
+
+function getSkillLogo(name){
+  const key = (name||'').toLowerCase().trim();
+  // exact match
+  if(SKILL_LOGOS[key] !== undefined) return SKILL_LOGOS[key];
+  // partial match — check if any key is contained in the skill name
+  for(const k of Object.keys(SKILL_LOGOS)){
+    if(k && key.includes(k)) return SKILL_LOGOS[k];
+  }
+  return null;
+}
+
+function skillBadge(name){
+  const logo = getSkillLogo(name);
+  const logoHTML = logo
+    ? `<span style="width:20px;height:20px;border-radius:5px;background:#fff;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;padding:2px">
+        <img src="${logo}" style="width:14px;height:14px;object-fit:contain;display:block" onerror="this.parentElement.style.display='none'">
+       </span>`
+    : '';
+  return `<span class="badge badge-purple" style="display:inline-flex;align-items:center;gap:6px;padding:5px 10px 5px ${logo?'5px':'10px'};font-size:12px;font-weight:600;border-radius:8px">${logoHTML}${name}</span>`;
+}
+
+// ── PRO NAME STYLES ─────────────────────────────────────────
+const NAME_STYLES = {
+  default:  {label:'Default',         type:'plain', css:''},
+  fire:     {label:'🔥 Fire',          type:'grad',  css:'background:linear-gradient(90deg,#ff6a00,#ee0979,#ff6a00);background-size:200%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:nsShift 3s linear infinite'},
+  ocean:    {label:'🌊 Ocean',         type:'grad',  css:'background:linear-gradient(90deg,#00c6fb,#005bea,#00c6fb);background-size:200%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:nsShift 3s linear infinite'},
+  gold:     {label:'⭐ Gold',           type:'grad',  css:'background:linear-gradient(90deg,#f7971e,#ffd200,#b8860b,#ffd200,#f7971e);background-size:200%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:nsShift 4s linear infinite'},
+  neon:     {label:'💜 Neon',          type:'grad',  css:'background:linear-gradient(90deg,#a855f7,#ec4899,#a855f7);background-size:200%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:nsShift 3s linear infinite'},
+  aurora:   {label:'🌌 Aurora',        type:'grad',  css:'background:linear-gradient(90deg,#00c3ff,#ffff1c,#ff69b4,#00c3ff);background-size:200%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:nsShift 5s linear infinite'},
+  chrome:   {label:'⚡ Chrome',        type:'grad',  css:'background:linear-gradient(90deg,#bdc3c7,#fff,#bdc3c7,#2c3e50,#bdc3c7);background-size:200%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:nsShift 4s linear infinite'},
+  birds:    {label:'🐦 Birds',         type:'letter', anim:'nsBird',  dur:0.6, colors:['#00c6fb','#00e5ff','#80d8ff','#40c4ff']},
+  bounce:   {label:'🏀 Bounce',        type:'letter', anim:'nsBounce',dur:0.5, colors:['#ff6a00','#ee0979','#ffd200','#a855f7','#38ef7d']},
+  shake:    {label:'😱 Shake',         type:'letter', anim:'nsShake', dur:0.4, colors:['#f87171','#fb923c','#facc15','#4ade80','#60a5fa','#c084fc']},
+  wave:     {label:'🌊 Wave',          type:'letter', anim:'nsWave',  dur:0.6, colors:['#00c6fb','#0ea5e9','#38bdf8','#7dd3fc']},
+  pulse:    {label:'💓 Pulse',         type:'letter', anim:'nsPulse', dur:0.8, colors:['#ec4899','#f43f5e','#fb7185','#fda4af']},
+  glitch:   {label:'📺 Glitch',        type:'letter', anim:'nsGlitch',dur:0.3, colors:['#fff','#ff0080','#00ffff']},
+  rainbow:  {label:'🌈 Rainbow',       type:'letter', anim:'nsRainbow',dur:1.2,colors:['#ff0000','#ff7700','#ffff00','#00ff00','#0099ff','#cc00ff']},
+  float:    {label:'🎈 Float',         type:'letter', anim:'nsFloat', dur:1.5, colors:['#c084fc','#e879f9','#a855f7','#818cf8']},
+  spark:    {label:'✨ Spark',         type:'letter', anim:'nsSpark', dur:0.7, colors:['#ffd700','#fff176','#ffee58','#ffd600']},
+  flip:     {label:'🔄 Flip',          type:'letter', anim:'nsFlip',  dur:0.8, colors:['#34d399','#10b981','#6ee7b7','#a7f3d0']},
+};
+
+(function(){
+  if(document.getElementById('proNameKF')) return;
+  const s = document.createElement('style');
+  s.id = 'proNameKF';
+  s.textContent = `
+    @keyframes nsShift   {0%{background-position:0% 50%}100%{background-position:200% 50%}}
+    @keyframes nsBird    {0%,100%{transform:translateY(0) rotate(0deg)}25%{transform:translateY(-6px) rotate(-8deg)}75%{transform:translateY(-3px) rotate(5deg)}}
+    @keyframes nsBounce  {0%,100%{transform:translateY(0)}40%{transform:translateY(-8px)}60%{transform:translateY(-4px)}}
+    @keyframes nsShake   {0%,100%{transform:translateX(0) rotate(0)}20%{transform:translateX(-3px) rotate(-4deg)}40%{transform:translateX(3px) rotate(4deg)}60%{transform:translateX(-2px) rotate(-2deg)}80%{transform:translateX(2px) rotate(2deg)}}
+    @keyframes nsWave    {0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
+    @keyframes nsPulse   {0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.18);opacity:0.85}}
+    @keyframes nsGlitch  {0%,100%{transform:skewX(0)}15%{transform:skewX(-8deg)}30%{transform:skewX(6deg)}45%{transform:skewX(-3deg)}60%{transform:skewX(2deg)}}
+    @keyframes nsRainbow {0%{filter:hue-rotate(0deg)}100%{filter:hue-rotate(360deg)}}
+    @keyframes nsFloat   {0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-9px) scale(1.08)}}
+    @keyframes nsSpark   {0%,100%{transform:scale(1) rotate(0deg);text-shadow:0 0 0 transparent}50%{transform:scale(1.2) rotate(10deg);text-shadow:0 0 8px currentColor}}
+    @keyframes nsFlip    {0%,100%{transform:rotateY(0deg)}50%{transform:rotateY(180deg)}}
+  `;
+  document.head.appendChild(s);
+})();
+
+function renderProName(el, name, isPro, styleKey){
+  if(!el) return;
+  const sk = (isPro && styleKey) ? styleKey : 'default';
+  const ns = NAME_STYLES[sk] || NAME_STYLES.default;
+  if(!isPro || sk === 'default' || !ns.type || ns.type === 'plain'){
+    el.textContent = name;
+    el.removeAttribute('style');
+    return;
+  }
+  if(ns.type === 'grad'){
+    el.textContent = name;
+    el.setAttribute('style', ns.css + ';font-family:inherit;font-size:inherit;font-weight:inherit;display:inline-block;');
+    return;
+  }
+  // letter-by-letter animation
+  const chars = name.split('');
+  const colors = ns.colors || ['#fff'];
+  const dur = ns.dur || 0.6;
+  const anim = ns.anim;
+  el.removeAttribute('style');
+  el.innerHTML = chars.map((ch, i) => {
+    if(ch === ' ') return '<span style="display:inline-block;width:0.35em">&nbsp;</span>';
+    const color = colors[i % colors.length];
+    const delay = (i * dur / Math.max(chars.length, 1) * 0.8).toFixed(2);
+    const extraCss = anim === 'nsRainbow' ? `filter:hue-rotate(${i*30}deg);` : '';
+    return `<span style="display:inline-block;color:${color};${extraCss}animation:${anim} ${dur + i*0.05}s ${delay}s ease-in-out infinite;will-change:transform;">${ch}</span>`;
+  }).join('');
+}
+
+// ── PRO AVATAR FRAMES ────────────────────────────────────────
+const PRO_FRAMES = {
+  none:    { label: 'None',        css: '' },
+  fire:    { label: '🔥 Fire',     css: 'animation:pfFire 2s linear infinite;background:conic-gradient(from var(--pf-a,0deg),#ff6a00,#ee0979,#ff6a00,#ffd200,#ff6a00);padding:3px;' },
+  ocean:   { label: '🌊 Ocean',    css: 'animation:pfSpin 3s linear infinite;background:conic-gradient(from var(--pf-a,0deg),#00c6fb,#005bea,#00e5ff,#00c6fb);padding:3px;' },
+  gold:    { label: '⭐ Gold',      css: 'animation:pfPulse 2s ease-in-out infinite;background:conic-gradient(from var(--pf-a,0deg),#f7971e,#ffd200,#b8860b,#ffd200,#f7971e);padding:3px;' },
+  neon:    { label: '💜 Neon',     css: 'animation:pfSpin 2.5s linear infinite;background:conic-gradient(from var(--pf-a,0deg),#a855f7,#ec4899,#7c3aed,#a855f7);padding:3px;' },
+  aurora:  { label: '🌌 Aurora',   css: 'animation:pfSpin 4s linear infinite;background:conic-gradient(from var(--pf-a,0deg),#00c3ff,#ff69b4,#ffff1c,#00c3ff);padding:3px;' },
+  rainbow: { label: '🌈 Rainbow',  css: 'animation:pfSpin 2s linear infinite;background:conic-gradient(from var(--pf-a,0deg),#ff0000,#ff7700,#ffff00,#00ff00,#0099ff,#cc00ff,#ff0000);padding:3px;' },
+  chrome:  { label: '⚡ Chrome',   css: 'animation:pfPulse 1.8s ease-in-out infinite;background:conic-gradient(from var(--pf-a,0deg),#bdc3c7,#fff,#2c3e50,#bdc3c7);padding:3px;' },
+};
+
+(function(){
+  if(document.getElementById('proFrameKF')) return;
+  const s = document.createElement('style');
+  s.id = 'proFrameKF';
+  s.textContent = `
+    @property --pf-a { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+    @keyframes pfSpin   { to { --pf-a: 360deg; } }
+    @keyframes pfFire   { 0%{--pf-a:0deg}50%{--pf-a:200deg}100%{--pf-a:360deg} }
+    @keyframes pfPulse  { 0%,100%{--pf-a:0deg;filter:brightness(1)}50%{--pf-a:180deg;filter:brightness(1.3)} }
+    .pf-wrap { display:inline-flex;border-radius:50%;overflow:hidden;flex-shrink:0; }
+    .pf-inner { width:100%;height:100%;border-radius:50%;overflow:hidden;background:var(--surface); }
+    .pf-inner img,.pf-inner>*{ width:100%;height:100%;object-fit:cover;border-radius:50%; }
+  `;
+  document.head.appendChild(s);
+})();
+
+// Wrap an avatar element with a Pro frame
+function wrapAvatarWithFrame(el, frameKey, size){
+  if(!frameKey || frameKey==='none' || !el) return;
+  const fr = PRO_FRAMES[frameKey];
+  if(!fr || !fr.css) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'pf-wrap';
+  wrap.style.cssText = fr.css + `width:${size+6}px;height:${size+6}px;`;
+  const inner = document.createElement('div');
+  inner.className = 'pf-inner';
+  inner.style.cssText = `margin:3px;width:${size}px;height:${size}px;`;
+  el.parentNode.insertBefore(wrap, el);
+  inner.appendChild(el);
+  wrap.appendChild(inner);
+}
+
+// u2500u2500 PRO NAME RENDERER u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500u2500
 
 function skeletonCards(n){
   return Array(n).fill(0).map(()=>`
@@ -2052,6 +2590,134 @@ html{scroll-behavior:smooth;}
   #pvHeroBanner{height:160px!important;}
 }
 
+
+/* ══════════════════════════════════════════════
+   EDIT PROFILE MODAL — Mobile Polish
+═══════════════════════════════════════════════ */
+@media(max-width:768px){
+  /* Modal overlay full screen on mobile */
+  .modal-overlay{ padding:0; align-items:flex-end; }
+  .modal{
+    border-radius:20px 20px 0 0 !important;
+    max-height:92vh;
+    padding:20px 14px 32px !important;
+    overflow-y:auto;
+    -webkit-overflow-scrolling:touch;
+  }
+  /* Edit profile grid: single column */
+  .ep-grid{ grid-template-columns:1fr !important; gap:12px !important; }
+
+  /* Profile preview card — compact horizontal strip instead of sticky side panel */
+  .profile-preview-card{
+    position:static !important;
+    display:flex !important;
+    flex-direction:row !important;
+    align-items:center !important;
+    gap:14px !important;
+    padding:14px !important;
+    text-align:left !important;
+    border-radius:14px !important;
+    margin-bottom:4px;
+  }
+  #prevLabel{ display:none !important; } /* hide "PROFILE PREVIEW" label on mobile */
+  #prevAvatarWrap{ margin:0 !important; flex-shrink:0; }
+  #prevAvatarWrap > div, #prevAvatarWrap > div.preview-avatar{
+    margin:0 !important;
+    width:48px !important; height:48px !important;
+    font-size:17px !important;
+  }
+  /* name/role stack */
+  #prevName{ font-size:14px !important; }
+  #prevRole{ font-size:11px !important; margin-top:1px !important; }
+  /* hide bio/skills/tags/social in compact mobile preview */
+  #prevBio, #prevSkills, #prevTags, #prevSocialLinks{ display:none !important; }
+
+  /* Name style picker — 2 col on mobile (cards are narrow enough) */
+  #epNameStylePicker{
+    grid-template-columns:1fr 1fr !important;
+    gap:6px !important;
+  }
+  #epNameStylePicker > div{
+    padding:8px 8px !important;
+    font-size:11px !important;
+  }
+  #epNameStylePicker > div span:first-child{ font-size:11px !important; max-width:120px !important; }
+  #epNameStylePicker > div span:last-child{ font-size:9px !important; }
+
+  /* Frame picker — 2 col */
+  #epFramePicker{
+    grid-template-columns:1fr 1fr !important;
+    gap:6px !important;
+  }
+  #epFramePicker > div{ padding:8px 8px !important; }
+  #epFramePicker > div span:last-child{ font-size:10px !important; }
+
+  /* Sections inside edit profile */
+  #epNameStyleSection, #epFrameSection{
+    padding:12px 12px !important;
+    border-radius:10px !important;
+    margin-bottom:12px !important;
+  }
+  /* form inputs comfortable touch targets */
+  .form-input, .form-select, .form-textarea{
+    font-size:16px !important; /* prevent iOS zoom */
+    padding:11px 13px !important;
+  }
+  .form-group{ margin-bottom:12px !important; }
+  .modal-title{ font-size:18px !important; margin-bottom:4px !important; }
+  .modal-sub{ font-size:13px !important; margin-bottom:16px !important; }
+
+  /* Admin panel — stack user card vertically, buttons wrap full-width */
+  #adminUsersList > div > div{
+    flex-direction:column !important;
+    align-items:flex-start !important;
+    gap:10px !important;
+  }
+  #adminUsersList .admin-btn-row,
+  #adminUsersList > div > div > div:last-child{
+    width:100% !important;
+    display:grid !important;
+    grid-template-columns:1fr 1fr !important;
+    gap:6px !important;
+  }
+  #adminUsersList > div > div > div:last-child button,
+  #adminUsersList > div > div > div:last-child span{
+    width:100% !important;
+    justify-content:center !important;
+    text-align:center !important;
+    font-size:11px !important;
+    padding:7px 6px !important;
+  }
+  /* admin search bar */
+  #adminSearchInput{ font-size:14px !important; }
+
+  /* Pricing page — single col already, but tighten padding */
+  .price-card{ padding:24px 18px !important; }
+  .price-amount{ font-size:28px !important; }
+  .price-features li{ font-size:13px !important; padding:6px 0 !important; }
+
+  /* Profile page banner + card */
+  #pvHeroBanner{ height:140px !important; }
+  #pvAvatar{ width:72px !important; height:72px !important; font-size:26px !important; }
+  .profile-hero-name{ font-size:20px !important; }
+}
+
+@media(max-width:480px){
+  /* Even tighter on very small screens */
+  .modal{ padding:16px 12px 28px !important; }
+  #epNameStylePicker, #epFramePicker{
+    grid-template-columns:1fr 1fr !important;
+  }
+  /* Admin buttons single col on tiny screens */
+  #adminUsersList > div > div > div:last-child{
+    grid-template-columns:1fr 1fr !important;
+  }
+  .profile-preview-card{
+    padding:10px 12px !important;
+    gap:10px !important;
+  }
+}
+
 /* ══════════════════════════════════════════════
    MOBILE BOTTOM NAV — YouTube/TikTok style
 ═══════════════════════════════════════════════ */
@@ -2384,7 +3050,9 @@ html{scroll-behavior:smooth;}
         <ul class="price-features">
           <li>Everything in Free</li><li>Unlimited projects</li><li>5 GB storage</li>
           <li>Verified badge ✓</li><li>Full analytics</li><li>Priority in search</li>
-          <li>Social links (IG, WA, YT, Behance…)</li><li>Inquiry inbox</li><li>Priority support</li>
+          <li>Social links (IG, WA, YT, Behance…)</li><li>Inquiry inbox</li>
+          <li>✨ Animated name styles</li><li>🖼 Animated profile frame</li>
+          <li>Priority support</li>
         </ul>
         <button class="btn btn-primary" style="width:100%;justify-content:center" onclick="openModal('upgrade')">Upgrade to Pro</button>
       </div>
@@ -2822,6 +3490,24 @@ html{scroll-behavior:smooth;}
       <div class="form-group"><label class="form-label">Bio</label><textarea id="ep_bio" class="form-textarea" rows="3" placeholder="Tell clients about yourself…" oninput="updateProfilePreview()"></textarea></div>
       <div class="form-group"><label class="form-label">Skills (comma separated)</label><input type="text" id="ep_skills" class="form-input" placeholder="Photoshop, Figma, After Effects" oninput="updateProfilePreview()"></div>
       <div class="form-group"><label class="form-label">Tags (comma separated)</label><input type="text" id="ep_tags" class="form-input" placeholder="Branding, Logo, Social Media" oninput="updateProfilePreview()"></div>
+      <div id="epNameStyleSection" style="margin-bottom:16px;border:1px solid rgba(168,85,247,0.25);border-radius:12px;padding:14px 16px;background:rgba(168,85,247,0.04)">
+        <label class="form-label" style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+          ✨ Name Style
+          <span id="epNameStyleProBadge" style="font-size:10px;font-weight:500;background:rgba(255,92,0,0.15);color:var(--orange);border:1px solid rgba(255,92,0,0.3);border-radius:100px;padding:2px 8px">Pro Only</span>
+        </label>
+        <div id="epNameStylePicker" style="display:grid;grid-template-columns:1fr 1fr;gap:8px"></div>
+        <div id="epNameStyleLock" style="display:none;font-size:12px;color:var(--text-muted);text-align:center;padding:8px 0">🔒 Unlock with Pro — <span onclick="closeModal('editprofile');openModal('upgrade')" style="color:var(--orange);cursor:pointer;text-decoration:underline;font-weight:600">Upgrade to Pro</span> to use animated name styles.</div>
+      </div>
+
+      <!-- FRAME PICKER -->
+      <div id="epFrameSection" style="margin-bottom:16px;border:1px solid rgba(255,92,0,0.22);border-radius:12px;padding:14px 16px;background:rgba(255,92,0,0.04)">
+        <label class="form-label" style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+          🖼 Profile Frame
+          <span style="font-size:10px;font-weight:500;background:rgba(255,92,0,0.15);color:var(--orange);border:1px solid rgba(255,92,0,0.3);border-radius:100px;padding:2px 8px">Pro Only</span>
+        </label>
+        <div id="epFramePicker" style="display:grid;grid-template-columns:1fr 1fr;gap:8px"></div>
+        <div id="epFrameLock" style="display:none;font-size:12px;color:var(--text-muted);text-align:center;padding:8px 0">🔒 Unlock with Pro — <span onclick="closeModal('editprofile');openModal('upgrade')" style="color:var(--orange);cursor:pointer;text-decoration:underline;font-weight:600">Upgrade to Pro</span> to use animated profile frames.</div>
+      </div>
       <div class="form-group" style="border:1px solid rgba(255,215,0,0.2);border-radius:10px;padding:12px 14px;background:rgba(255,215,0,0.04)">
         <label class="form-label" style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
           🏅 Title Badge
@@ -2843,8 +3529,8 @@ html{scroll-behavior:smooth;}
     </div>
     <div>
       <div class="profile-preview-card" style="position:sticky;top:20px">
-        <div style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-muted);margin-bottom:16px">Profile Preview</div>
-        <div class="preview-avatar" id="prevAvatar" style="background:#FF5C00">?</div>
+        <div id="prevLabel" style="font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text-muted);margin-bottom:16px">Profile Preview</div>
+        <div id="prevAvatarWrap" style="display:flex;justify-content:center;margin-bottom:0"><div class="preview-avatar" id="prevAvatar" style="background:#FF5C00">?</div></div>
         <div style="font-family:var(--font-display);font-size:16px;font-weight:700;color:var(--text)" id="prevName">Your Name</div>
         <div style="font-size:12px;color:var(--text-muted);margin-top:3px" id="prevRole">Your Role</div>
         <div style="font-size:12px;color:var(--text-muted);margin-top:8px;line-height:1.6;text-align:left" id="prevBio">Your bio…</div>
