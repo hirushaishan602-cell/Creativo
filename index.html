@@ -64,6 +64,7 @@ onAuthStateChanged(auth, async (user) => {
     _isAdminCached = false;
     updateNavLoggedOut();
     if(unsubInquiries){ unsubInquiries(); unsubInquiries=null; }
+    if(unsubNotifications){ unsubNotifications(); unsubNotifications=null; }
     document.getElementById('notifDot').style.display='none';
   }
   // Handle ?user= deep link once after first auth resolve
@@ -105,20 +106,33 @@ function updateNavLoggedOut(){
   if(typeof updateMobileBottomNav==='function') updateMobileBottomNav();
 }
 
+let unsubNotifications = null;
+
 function subscribeInquiries(){
   if(!CU) return;
   const q = query(collection(db,"inquiries"), where("creativeId","==",CU.uid));
-  unsubInquiries = onSnapshot(q, snap => {
-    const cnt = snap.docs.filter(d=>d.data().read===false).length;
+  unsubInquiries = onSnapshot(q, ()=>updateNotifBadge());
+  const qn = query(collection(db,"notifications"), where("userId","==",CU.uid));
+  unsubNotifications = onSnapshot(qn, ()=>updateNotifBadge());
+}
+
+async function updateNotifBadge(){
+  if(!CU) return;
+  try{
+    const [inqSnap, notifSnap] = await Promise.all([
+      getDocs(query(collection(db,"inquiries"), where("creativeId","==",CU.uid))),
+      getDocs(query(collection(db,"notifications"), where("userId","==",CU.uid)))
+    ]);
+    const cnt = inqSnap.docs.filter(d=>!d.data().read).length
+              + notifSnap.docs.filter(d=>!d.data().read).length;
     const dot = document.getElementById('notifDot');
     const badge = document.getElementById('notifBadge');
     const navBadge = document.getElementById('navNotifBadge');
     dot.style.display = cnt>0?'flex':'none';
     if(badge) badge.textContent = cnt;
     if(navBadge){ navBadge.textContent=cnt; navBadge.style.display=cnt>0?'flex':'none'; }
-    if(cnt>0) document.getElementById('notifBtn').style.animation='pulse 1.5s infinite';
-    else document.getElementById('notifBtn').style.animation='none';
-  });
+    document.getElementById('notifBtn').style.animation = cnt>0?'pulse 1.5s infinite':'none';
+  }catch(e){}
 }
 
 window.doSignUp = async function(){
@@ -203,40 +217,142 @@ window.doSignOut = async function(){
   showToast('Signed out.');
 };
 
-async function uploadToCloudinary(file){
-  const fd=new FormData();
-  fd.append('file',file);
-  fd.append('upload_preset',PRESET);
-  fd.append('folder','creativo_projects');
-  const res=await fetch(`https://api.cloudinary.com/v1_1/${CLOUD}/auto/upload`,{method:'POST',body:fd});
-  if(!res.ok) throw new Error('Upload failed');
-  return (await res.json()).secure_url;
+let _activeXHR = null;
+let _uploadCancelled = false;
+
+async function uploadToCloudinary(file, onProgress){
+  return new Promise((resolve, reject)=>{
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('upload_preset', PRESET);
+    fd.append('folder', 'creativo_projects');
+    const xhr = new XMLHttpRequest();
+    _activeXHR = xhr;
+    xhr.open('POST', `https://api.cloudinary.com/v1_1/${CLOUD}/auto/upload`);
+    if(onProgress){
+      xhr.upload.addEventListener('progress', e=>{
+        if(e.lengthComputable) onProgress(Math.round((e.loaded/e.total)*100));
+      });
+    }
+    xhr.onload = ()=>{
+      _activeXHR = null;
+      if(_uploadCancelled) return;
+      if(xhr.status===200){ resolve(JSON.parse(xhr.responseText).secure_url); }
+      else { reject(new Error('Upload failed')); }
+    };
+    xhr.onerror = ()=>{ _activeXHR=null; if(!_uploadCancelled) reject(new Error('Network error')); };
+    xhr.onabort = ()=>{ _activeXHR=null; resolve(''); };
+    xhr.send(fd);
+  });
+}
+
+function cancelUpload(){
+  _uploadCancelled = true;
+  if(_activeXHR){
+    try{ _activeXHR.abort(); }catch(e){}
+    _activeXHR = null;
+  }
+  resetUploadZone();
+  hideUploadPill();
+  showToast('⛔ Upload cancelled.');
+  // Reset flag after a full event-loop cycle so doUpload checks fire first
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{ _uploadCancelled = false; }));
+}
+
+// ── FLOATING UPLOAD PILL ─────────────────────────────────────
+function showUploadPill(pct, label){
+  let pill = document.getElementById('_uploadPill');
+  if(!pill){
+    pill = document.createElement('div');
+    pill.id = '_uploadPill';
+    pill.style.cssText = `
+      position:fixed;bottom:24px;right:20px;z-index:99999;
+      background:#1a1a1a;border:1px solid rgba(255,92,0,0.45);
+      border-radius:999px;padding:10px 16px 10px 12px;
+      display:flex;align-items:center;gap:10px;
+      box-shadow:0 4px 24px rgba(0,0,0,0.55);
+      font-family:var(--font-body,'DM Sans',sans-serif);
+      min-width:220px;max-width:280px;
+      animation:_pillIn .25s cubic-bezier(.34,1.56,.64,1) both;
+    `;
+    document.body.appendChild(pill);
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes _pillIn{from{opacity:0;transform:translateY(20px) scale(.92)}to{opacity:1;transform:translateY(0) scale(1)}}
+      @keyframes _pillOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(16px)}}
+      #_uploadPill._done{animation:_pillOut .35s ease forwards;}
+    `;
+    document.head.appendChild(style);
+  }
+  const ringDash = Math.round((pct/100)*100);
+  pill.innerHTML = `
+    <svg width="32" height="32" viewBox="0 0 36 36" style="flex-shrink:0;transform:rotate(-90deg)">
+      <circle cx="18" cy="18" r="15" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="3"/>
+      <circle cx="18" cy="18" r="15" fill="none" stroke="#FF5C00" stroke-width="3"
+        stroke-dasharray="${ringDash} 100" stroke-dashoffset="0"
+        stroke-linecap="round"
+        style="transition:stroke-dasharray .3s ease;filter:drop-shadow(0 0 4px rgba(255,92,0,.6))"/>
+      <text x="18" y="18" text-anchor="middle" dominant-baseline="central"
+        style="transform:rotate(90deg);transform-origin:18px 18px;fill:white;font-size:9px;font-weight:800;font-family:sans-serif">
+        ${pct}%
+      </text>
+    </svg>
+    <div style="flex:1;min-width:0">
+      <div style="font-size:12px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${label||'Uploading…'}</div>
+      <div style="margin-top:4px;background:rgba(255,255,255,0.1);border-radius:99px;height:3px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,#FF5C00,#ff8c42);border-radius:99px;transition:width .3s ease"></div>
+      </div>
+    </div>
+  `;
+}
+function hideUploadPill(){
+  const pill = document.getElementById('_uploadPill');
+  if(!pill) return;
+  pill.classList.add('_done');
+  setTimeout(()=>pill.remove(), 400);
 }
 
 window.doUpload = async function(){
   if(!CU){showToast('⚠️ Please sign in first');return;}
   const title=v('up_title'),cat=v('up_category'),desc=v('up_desc'),fi=document.getElementById('up_file');
+  const yearVal=parseInt(document.getElementById('up_year')?.value)||new Date().getFullYear();
   if(!title||!cat){showToast('⚠️ Fill title and category');return;}
   const maxProjects=CUD?.isPro?999:3;
   const mySnap=await getDocs(query(collection(db,"projects"),where("authorId","==",CU.uid)));
   if(mySnap.size>=maxProjects&&!CUD?.isPro){showToast('⚠️ Free plan: max 3 projects. Upgrade to Pro!');openModal('upgrade');return;}
+  _uploadCancelled = false;
   try{
-    showToast('Publishing...');
     let coverURL='';
     if(fi.files.length>0){
       const file=fi.files[0];
       const maxMB=CUD?.isPro?250:50;
       if(file.size>maxMB*1024*1024){showToast(`⚠️ Max ${maxMB}MB`);return;}
-      setUploadZoneLoading(true);
-      coverURL=await uploadToCloudinary(file);
-      setUploadZoneLoading(false);
+      setUploadZoneLoading(true, 0, 'Uploading project file…');
+      showUploadPill(0, 'Uploading project file…');
+      coverURL = await uploadToCloudinary(file, pct=>{
+        if(_uploadCancelled) return;
+        updateUploadProgress(pct, 'Uploading project file…');
+        showUploadPill(pct, 'Uploading project file…');
+      });
+      if(_uploadCancelled) return;
     }
     let thumbnailURL='';
     const thumbSource = window._thumbnailFile || (window._aiThumbOverride && window._aiBlob ? new File([window._aiBlob],'ai-thumbnail.png',{type:'image/png'}) : null);
     if(thumbSource){
-      showToast('⏳ Uploading thumbnail...');
-      thumbnailURL=await uploadToCloudinary(thumbSource);
+      if(_uploadCancelled) return;
+      setUploadZoneLoading(true, 0, 'Uploading thumbnail…');
+      showUploadPill(0, 'Uploading thumbnail…');
+      thumbnailURL = await uploadToCloudinary(thumbSource, pct=>{
+        if(_uploadCancelled) return;
+        updateUploadProgress(pct, 'Uploading thumbnail…');
+        showUploadPill(pct, 'Uploading thumbnail…');
+      });
+      if(_uploadCancelled) return;
     }
+    if(_uploadCancelled) return;
+    // Saving to database
+    updateUploadProgress(100, 'Saving to database…');
+    showUploadPill(100, 'Saving to database…');
     const authorName=`${CUD?.firstName||''} ${CUD?.lastName||''}`.trim();
     await addDoc(collection(db,"projects"),{
       title,category:cat,description:desc,coverURL,thumbnailURL,
@@ -244,20 +360,51 @@ window.doUpload = async function(){
       authorAvatarURL:CUD?.avatarURL||'',
       authorVerified:CUD?.verified||false,
       authorIsPro:CUD?.isPro||false,
-      views:0,likes:0,createdAt:serverTimestamp()
+      views:0,likes:0,year:yearVal,createdAt:serverTimestamp()
     });
     await updateDoc(doc(db,"users",CU.uid),{projectCount:increment(1)});
     closeModal('upload');
     resetUploadZone();
+    hideUploadPill();
     showToast('✅ Project published!');
     loadDashboard();
     loadPublicProjects();
-  }catch(e){setUploadZoneLoading(false);showToast('❌ '+e.message);}
+  }catch(e){ if(_uploadCancelled){return;} resetUploadZone();hideUploadPill();showToast('❌ '+e.message); }
 };
 
-function setUploadZoneLoading(on){
-  const z=document.getElementById('uploadZone');
-  if(on) z.innerHTML='<div style="font-size:32px">☁️</div><p style="margin-top:8px;font-weight:500;color:var(--text-muted)">Uploading to cloud...</p>';
+function setUploadZoneLoading(on, pct, label){
+  const z = document.getElementById('uploadZone');
+  if(!z) return;
+  if(!on){ return; } // caller handles reset via resetUploadZone
+  const percent = (pct||0);
+  const lbl = label || 'Uploading project file…';
+  z.innerHTML = `
+    <div style="width:100%;padding:8px 4px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+        <div style="font-size:26px;animation:spin 1.2s linear infinite">☁️</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:2px">${lbl}</div>
+          <div style="font-size:11px;color:var(--text-muted)">Window close කළත් upload continue වෙනවා</div>
+        </div>
+        <div style="font-size:20px;font-weight:800;color:var(--orange);font-family:var(--font-display);min-width:44px;text-align:right">${percent}%</div>
+      </div>
+      <div style="background:rgba(255,255,255,0.07);border-radius:99px;height:5px;overflow:hidden;margin-bottom:14px">
+        <div id="uploadProgressBar" style="height:100%;width:${percent}%;background:linear-gradient(90deg,#FF5C00,#ff8c42);border-radius:99px;box-shadow:0 0 8px rgba(255,92,0,.5);transition:width .25s ease"></div>
+      </div>
+    </div>`;
+}
+
+function updateUploadProgress(pct, label){
+  const bar = document.getElementById('uploadProgressBar');
+  const z   = document.getElementById('uploadZone');
+  if(!z) return;
+  // update % number
+  const pctEl = z.querySelector('[style*="font-size:20px"]');
+  if(pctEl) pctEl.textContent = pct + '%';
+  // update label
+  const lblEl = z.querySelector('[style*="font-size:13px"]');
+  if(lblEl && label) lblEl.textContent = label;
+  if(bar) bar.style.width = pct + '%';
 }
 function resetUploadZone(){
   document.getElementById('aiResult').style.display='none';
@@ -267,6 +414,7 @@ function resetUploadZone(){
   document.getElementById('aiChevron').style.transform='rotate(0)';
   document.getElementById('uploadZone').innerHTML=`<div style="font-size:36px;margin-bottom:8px">📁</div><div style="font-size:14px;font-weight:500;color:var(--text)">Drop files here or click to upload</div><div style="font-size:12px;color:var(--text-muted);margin-top:4px">Images or Video · Max 50MB free / 250MB Pro</div>`;
   document.getElementById('up_title').value='';
+  const yearEl=document.getElementById('up_year'); if(yearEl) yearEl.value=new Date().getFullYear();
   document.getElementById('up_desc').value='';
   document.getElementById('up_file').value='';
   document.getElementById('up_thumbnail').value='';
@@ -379,6 +527,7 @@ window.loadPublicProjects = async function(category='all'){
       if(sp) renderProName(sp, p.authorName||'Creative', p.authorIsPro, p.authorNameStyle||'default');
     });
     loadUserLikes();
+    requestAnimationFrame(()=>requestAnimationFrame(setupVideoAutoplay));
   }catch(e){grid.innerHTML=emptyState('⚠️','Could not load projects','Check your connection and try again.');}
 };
 
@@ -398,14 +547,20 @@ function projectCard(p,bg,isOwn){
   const isVideo = p.coverURL && (p.coverURL.includes('/video/') || p.coverURL.match(/\.(mp4|mov|webm)/i));
   let thumbHTML = '';
   if(p.thumbnailURL){
-    thumbHTML = `<img src="${p.thumbnailURL}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`;
-    if(isVideo) thumbHTML += `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none"><div style="width:46px;height:46px;background:rgba(0,0,0,.65);border-radius:50%;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="20" height="20"><polygon points="8,5 19,12 8,19" fill="white"/></svg></div></div>`;
-  } else if(isVideo){
-    thumbHTML = `<video src="${p.coverURL}" style="width:100%;height:100%;object-fit:cover" muted playsinline preload="metadata"
-      onmouseover="this.play();this.nextElementSibling.style.opacity='0'" onmouseout="this.pause();this.currentTime=0;this.nextElementSibling.style.opacity='1'"></video>
-      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;transition:opacity .25s">
+    // Has thumbnail: show thumbnail, hover → fade in video preview at 1.5x
+    thumbHTML = `<img src="${p.thumbnailURL}" class="vid-thumb-img" style="width:100%;height:100%;object-fit:cover;position:absolute;inset:0;z-index:2;transition:opacity .25s" onerror="this.style.display='none'">
+      <video class="hover-preview" data-src="${p.coverURL||''}" style="width:100%;height:100%;object-fit:cover;position:absolute;inset:0;z-index:1;opacity:0;transition:opacity .25s" muted playsinline preload="none" loop></video>
+      <div class="vid-play-icon" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:3;transition:opacity .25s">
         <div style="width:46px;height:46px;background:rgba(0,0,0,.65);border-radius:50%;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="20" height="20"><polygon points="8,5 19,12 8,19" fill="white"/></svg></div>
-      </div>`;
+      </div>
+      <span class="spd-badge" style="position:absolute;top:8px;left:8px;background:rgba(0,0,0,.7);color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:100px;z-index:4;opacity:0;transition:opacity .2s;pointer-events:none">1.5×</span>`;
+  } else if(isVideo){
+    // No thumbnail: video always visible, hover → play at 1.5x
+    thumbHTML = `<video class="hover-preview no-thumb" data-src="${p.coverURL}" style="width:100%;height:100%;object-fit:cover;position:absolute;inset:0" muted playsinline preload="none" loop></video>
+      <div class="vid-play-icon" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;transition:opacity .3s;z-index:2">
+        <div style="width:46px;height:46px;background:rgba(0,0,0,.65);border-radius:50%;display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" width="20" height="20"><polygon points="8,5 19,12 8,19" fill="white"/></svg></div>
+      </div>
+      <span class="spd-badge" style="position:absolute;top:8px;left:8px;background:rgba(0,0,0,.7);color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:100px;z-index:4;opacity:0;transition:opacity .2s;pointer-events:none">1.5×</span>`;
   } else if(p.coverURL){
     thumbHTML = `<img src="${p.coverURL}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`;
   } else {
@@ -424,7 +579,7 @@ function projectCard(p,bg,isOwn){
       <div class="portfolio-creator">
         ${(()=>{
           const _fk = p.authorProfileFrame;
-          const _fr = (p.authorIsPro && _fk && _fk!=='none') ? PRO_FRAMES[_fk] : null;
+          const _fr = (p.authorIsPro === true && _fk && _fk !== 'none' && PRO_FRAMES[_fk] && PRO_FRAMES[_fk].css) ? PRO_FRAMES[_fk] : null;
           if(_fr && _fr.css){
             return `<div style="${_fr.css}width:32px;height:32px;border-radius:50%;display:inline-flex;overflow:hidden;flex-shrink:0"><div style="margin:2px;width:28px;height:28px;border-radius:50%;${avatarStyle};display:flex;align-items:center;justify-content:center;font-size:10px;color:white;font-weight:700">${avatarContent}</div></div>`;
           }
@@ -448,6 +603,70 @@ function projectCard(p,bg,isOwn){
       </div>
     </div>
   </div>`;
+}
+
+
+// ── VIDEO HOVER PREVIEW (1.5x speed) ──────────────────────
+function setupVideoAutoplay(){
+  document.querySelectorAll('#projectGrid .portfolio-card').forEach(card=>{
+    const vid = card.querySelector('.hover-preview');
+    if(!vid) return;
+
+    const playIcon = card.querySelector('.vid-play-icon');
+    const spdBadge = card.querySelector('.spd-badge');
+    const thumbImg = card.querySelector('.vid-thumb-img');
+    const noThumb  = vid.classList.contains('no-thumb');
+
+    let _previewing = false;
+    function startPreview(){
+      if(_previewing) return;
+      _previewing = true;
+      const dsrc = vid.getAttribute('data-src');
+      if(!dsrc) return;
+      const doPlay = ()=>{
+        vid.playbackRate = 1.5;
+        vid.play().catch(()=>{});
+        if(playIcon) playIcon.style.opacity = '0';
+        if(spdBadge) spdBadge.style.opacity = '1';
+        if(thumbImg){ thumbImg.style.opacity='0'; vid.style.opacity='1'; }
+      };
+      if(!vid.getAttribute('src')){
+        vid.setAttribute('src', dsrc);
+        vid.load();
+        vid.addEventListener('canplay', doPlay, {once:true});
+      } else {
+        doPlay();
+      }
+    }
+
+    function stopPreview(){
+      _previewing = false;
+      vid.pause();
+      vid.currentTime = 0;
+      if(playIcon) playIcon.style.opacity = '1';
+      if(spdBadge) spdBadge.style.opacity = '0';
+      if(thumbImg){ thumbImg.style.opacity='1'; vid.style.opacity='0'; }
+    }
+
+    card.addEventListener('mouseenter', startPreview);
+    card.addEventListener('mouseleave', stopPreview);
+
+    // Touch: tap once to preview, tap again to open
+    let _touched = false, _touchTimer;
+    card.addEventListener('touchstart', e=>{
+      if(!_touched){
+        e.preventDefault();
+        _touched = true;
+        startPreview();
+        _touchTimer = setTimeout(()=>{ _touched=false; stopPreview(); }, 3000);
+      } else {
+        clearTimeout(_touchTimer);
+        _touched = false;
+        stopPreview();
+        // let onclick fire
+      }
+    }, {passive:false});
+  });
 }
 
 const _likedSet = new Set();
@@ -492,9 +711,24 @@ async function loadUserLikes(){
 }
 
 window.incrementView = async function(id){
-  const key = 'viewed_'+id;
-  if(sessionStorage.getItem(key)) return;
-  sessionStorage.setItem(key,'1');
+  // Logged-in user: use Firestore doc keyed by uid+projectId (permanent, cross-device)
+  // Guest: use localStorage key (persists across sessions on same browser)
+  const localKey = 'pv_' + id;
+
+  if(window.CU){
+    // Logged-in — check Firestore views collection
+    const viewRef = doc(db, 'views', CU.uid + '_' + id);
+    try{
+      const snap = await getDoc(viewRef);
+      if(snap.exists()) return; // already viewed
+      await setDoc(viewRef, {uid: CU.uid, projectId: id, ts: serverTimestamp()});
+    }catch(e){ return; } // on error don't double-count
+  } else {
+    // Guest — localStorage (survives page reload, won't re-count same browser)
+    if(localStorage.getItem(localKey)) return;
+    localStorage.setItem(localKey, '1');
+  }
+
   try{
     await updateDoc(doc(db,"projects",id),{views:increment(1)});
     const el = document.getElementById('vw_'+id);
@@ -515,7 +749,7 @@ window.deleteProject = async function(id){
 
 window.loadPublicCreatives = async function(type='all'){
   const grid=document.getElementById('creativesGrid');
-  grid.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text-muted)">Loading creatives...</div>';
+  grid.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text-muted)">Loading creators...</div>';
   try{
     let snap=await getDocs(query(collection(db,"users"),orderBy("createdAt","desc")));
     let users=snap.docs.map(d=>({id:d.id,...d.data()}));
@@ -523,10 +757,10 @@ window.loadPublicCreatives = async function(type='all'){
       const map={graphic:['graphic','brand','social','illustration'],video:['video','cinematographer','reels'],motion:['motion','3d']};
       users=users.filter(u=>map[type]?.some(k=>u.role?.toLowerCase().includes(k)));
     }
-    if(users.length===0){grid.innerHTML=emptyState('👥','No creatives yet','Be the first to join!');return;}
+    if(users.length===0){grid.innerHTML=emptyState('👥','No creators yet','Be the first to join!');return;}
     grid.innerHTML=users.map(c=>{
       const ini=(c.firstName?.[0]||'')+(c.lastName?.[0]||'');
-      const hasFr = c.isPro && c.profileFrame && c.profileFrame!=='none';
+      const hasFr = c.isPro === true && c.profileFrame && c.profileFrame!=='none' && PRO_FRAMES[c.profileFrame]?.css;
       const fr = hasFr ? PRO_FRAMES[c.profileFrame] : null;
       const avatarContent = c.avatarURL ? `<img src="${c.avatarURL}" style="width:100%;height:100%;object-fit:cover">` : (ini||'?');
       const avatarBg = c.avatarURL ? 'transparent' : (c.avatarColor||'#6B4EFF');
@@ -558,7 +792,7 @@ window.loadPublicCreatives = async function(type='all'){
       const sp=document.getElementById('cn_'+c.id);
       if(sp) renderProName(sp, ((c.firstName||'')+' '+(c.lastName||'')).trim(), c.isPro, c.nameStyle||'default');
     });
-  }catch(e){grid.innerHTML='<div style="text-align:center;padding:40px;color:var(--text-muted)">Could not load creatives.</div>';}
+  }catch(e){grid.innerHTML='<div style="text-align:center;padding:40px;color:var(--text-muted)">Could not load creators.</div>';}
 };
 
 window.openMyPortfolio = function(){
@@ -583,7 +817,25 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
     if(!snap.exists()){document.getElementById('pvName').textContent='User not found';return;}
     const u=snap.data(); const uid=snap.id;
     const selfView=selfOverride||(CU&&CU.uid===uid);
-    if(!selfView) updateDoc(doc(db,"users",uid),{profileViews:increment(1)}).catch(()=>{});
+    if(!selfView){
+      // Unique profile view — Firestore doc keyed by viewer+profile (logged-in)
+      // or localStorage keyed by profileId (guest)
+      const pvKey = 'ppv_' + uid;
+      if(window.CU){
+        const pvRef = doc(db,'profileViews', CU.uid + '_' + uid);
+        getDoc(pvRef).then(pvSnap=>{
+          if(pvSnap.exists()) return; // already viewed
+          setDoc(pvRef,{viewerId:CU.uid, profileId:uid, ts:serverTimestamp()})
+            .then(()=> updateDoc(doc(db,"users",uid),{profileViews:increment(1)}).catch(()=>{}))
+            .catch(()=>{});
+        }).catch(()=>{});
+      } else {
+        if(!localStorage.getItem(pvKey)){
+          localStorage.setItem(pvKey,'1');
+          updateDoc(doc(db,"users",uid),{profileViews:increment(1)}).catch(()=>{});
+        }
+      }
+    }
     const banner=document.getElementById('pvHeroBanner');
     if(u.bannerURL){
       banner.style.backgroundImage=`url(${u.bannerURL})`;
@@ -597,12 +849,19 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
     document.getElementById('pvHeroBannerEditBtn').style.display=selfView?'block':'none';
     const pvAv=document.getElementById('pvAvatar');
     const ini=(u.firstName?.[0]||'')+(u.lastName?.[0]||'');
+    // Remove any leftover frame wrap from previous profile view
+    const existingWrap = pvAv.closest('.pf-wrap');
+    if(existingWrap){
+      existingWrap.parentNode.insertBefore(pvAv, existingWrap);
+      existingWrap.remove();
+    }
+    pvAv.style.cssText='width:88px;height:88px;font-size:32px;border-radius:50%;border:4px solid var(--surface);display:flex;align-items:center;justify-content:center;font-weight:800;color:white;overflow:hidden;';
     if(u.avatarURL){
       pvAv.innerHTML=`<img src="${u.avatarURL}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">`;
       pvAv.style.background='transparent';
     } else { pvAv.innerHTML=ini||'?'; pvAv.style.background=u.avatarColor||'#6B4EFF'; }
     // Apply pro frame if set
-    if(u.isPro && u.profileFrame && u.profileFrame!=='none'){
+    if(u.isPro === true && u.profileFrame && u.profileFrame!=='none'){
       const fr=PRO_FRAMES[u.profileFrame];
       if(fr&&fr.css){
         pvAv.style.cssText='';
@@ -674,7 +933,7 @@ window.viewFirebaseProfile = async function(userId, projectId, selfOverride){
         ${selfView?`<button class="btn btn-primary" onclick="openModal('upload')" style="margin-top:12px">Upload a project →</button>`:''}
       </div>`;
     } else {
-      pDocs.forEach(p=>{ p.authorVerified=u.verified||false; p.authorIsPro=u.isPro||false; });
+      pDocs.forEach(p=>{ p.authorVerified=u.verified||false; p.authorIsPro=u.isPro||false; p.authorProfileFrame=u.profileFrame||'none'; });
       const profileCards = pDocs.map((p,i)=>{
         const bg2=bgs[i%bgs.length];
         const isVideo2=p.coverURL&&(p.coverURL.includes('/video/')||p.coverURL.match(/\.(mp4|mov|webm)/i));
@@ -916,6 +1175,15 @@ async function loadDashInquiries(){
 window.markInquiryRead = async function(id){
   await updateDoc(doc(db,"inquiries",id),{read:true});
   loadDashInquiries();
+};
+
+window.markSysNotifRead = async function(id){
+  try{
+    await updateDoc(doc(db,'notifications',id),{read:true});
+    updateNotifBadge();
+    toggleNotifPanel(); // close & reopen to refresh
+    toggleNotifPanel();
+  }catch(e){ showToast('❌ '+e.message); }
 };
 
 window.deleteInquiry = async function(id){
@@ -1242,7 +1510,7 @@ window.loadJobs = async function(){
       el.innerHTML=`<div style="text-align:center;padding:48px 20px">
         <div style="font-size:40px;margin-bottom:12px">📭</div>
         <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:6px">No jobs available right now</div>
-        <div style="font-size:13px;color:var(--text-muted);margin-bottom:20px">Be the first to post a job opportunity for Sri Lanka's creatives.</div>
+        <div style="font-size:13px;color:var(--text-muted);margin-bottom:20px">Be the first to post a job opportunity for Sri Lanka's creators.</div>
         ${CU?`<button class="btn btn-primary" onclick="openModal('postjob')">+ Post a Job</button>`:`<button class="btn btn-ghost" onclick="openModal('auth')">Sign in to post</button>`}
       </div>`;
       return;
@@ -1333,6 +1601,54 @@ window.deleteJob = async function(jobId, e){
     loadJobs();
   }catch(err){showToast('❌ '+err.message);}
 };
+
+// ── JOB AD BANNER ────────────────────────────────────────────
+let _jobBannerUnsub = null;
+
+function renderJobBanner(jobs){
+  const banner = document.getElementById('jobAdBanner');
+  const t1 = document.getElementById('jobAdTicker');
+  const t2 = document.getElementById('jobAdTicker2');
+  if(!banner || !t1 || !t2) return;
+  if(!jobs || jobs.length === 0){ banner.style.display='none'; return; }
+
+  const adLabel = `<span style="color:var(--orange);font-size:11px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;padding:0 28px 0 8px;">Advertisement</span><span class="ticker-sep">·</span>`;
+  const items = jobs.map(j => {
+    const isNew = j.createdAt && (Date.now()/1000 - (j.createdAt.seconds||0)) < 86400;
+    return `<span class="ticker-item">
+      <span class="ti-icon">${j.icon||'🎨'}</span>
+      <span class="ti-title">${j.title}</span>
+      <span class="ti-company">@ ${j.company}</span>
+      ${j.location?`<span class="ti-company"> · ${j.location}</span>`:''}
+      ${j.salary?`<span style="color:var(--orange);font-weight:700"> · LKR ${j.salary}</span>`:''}
+      ${isNew?`<span class="ti-new">NEW</span>`:''}
+    </span><span class="ticker-sep">·</span>`;
+  }).join('');
+  const tickerContent = adLabel + items;
+
+  t1.innerHTML = tickerContent;
+  t2.innerHTML = tickerContent;
+
+  if(banner.style.display === 'none' || banner.style.display === ''){
+    banner.style.display = 'block';
+    banner.style.transform = 'translateY(100%)';
+    banner.style.transition = 'transform 0.4s cubic-bezier(0.34,1.2,0.64,1)';
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      banner.style.transform = 'translateY(0)';
+    }));
+  }
+}
+
+function startJobBannerListener(){
+  if(_jobBannerUnsub) return;
+  const q = query(collection(db,'jobs'), orderBy('createdAt','desc'));
+  _jobBannerUnsub = onSnapshot(q, snap=>{
+    renderJobBanner(snap.docs.map(d=>({id:d.id,...d.data()})));
+  }, ()=>{});
+}
+// Start after a short delay for Firebase to init
+setTimeout(startJobBannerListener, 1500);
+
 
 window.doPostJob = async function(){
   const title=v('job_title'),company=v('job_company'),type=v('job_type'),loc=v('job_location'),sal=v('job_salary'),cat=v('job_category'),desc=v('job_desc'),wa=v('job_wa'),email=v('job_email');
@@ -1456,10 +1772,35 @@ window.adminTogglePro = async function(uid, give){
     await updateDoc(doc(db,'users',uid), {isPro: give});
     const pSnap = await getDocs(query(collection(db,'projects'),where('authorId','==',uid)));
     await Promise.all(pSnap.docs.map(d=>updateDoc(d.ref,{authorIsPro: give})));
+
+    // ── Write system notification to user ────────────────
+    if(give){
+      // Get user name for personalised message
+      const uSnap = await getDoc(doc(db,'users',uid));
+      const uData = uSnap.exists() ? uSnap.data() : {};
+      const firstName = uData.firstName || 'Creative';
+
+      // Calculate renewal date (30 days from now)
+      const renewDate = new Date();
+      renewDate.setDate(renewDate.getDate() + 30);
+      const renewStr = renewDate.toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'});
+
+      await addDoc(collection(db,'notifications'),{
+        userId: uid,
+        type: 'pro_activated',
+        title: '🎉 Pro Plan Activated!',
+        message: `ඔබේ Creativo Pro plan එක successfully activate කළා! Unlimited projects, verified badge, analytics, සහ සියලු Pro features දැන් active. ❤️ ස්තූතියි ${firstName}!`,
+        renewalDate: renewStr,
+        renewalMessage: `📅 ඔබේ Pro plan renewal date එක ${renewStr}. දිගටම Pro member වෙලා ඉන්න renewal ගෙවන්නට අමතක කරන්න එපා!`,
+        read: false,
+        createdAt: serverTimestamp()
+      });
+    }
+
     const idx = _allUsers.findIndex(u=>u.id===uid);
     if(idx>-1) _allUsers[idx].isPro = give;
     window.adminSearchUsers(document.getElementById('adminSearchInput')?.value||'');
-    showToast(give ? '⭐ Pro granted!' : '🗑 Pro removed');
+    showToast(give ? '⭐ Pro granted! Notification sent.' : '🗑 Pro removed');
   }catch(e){ showToast('❌ '+e.message); }
 };
 
@@ -1827,6 +2168,40 @@ function emptyState(icon,title,sub,btnText,btnAction){
 }
 
 document.addEventListener('DOMContentLoaded',()=>{
+  // ── Loader progress animation ───────────────────────────
+  const bar = document.getElementById('loaderBar');
+  const loader = document.getElementById('siteLoader');
+
+  // Step the bar forward in stages
+  const steps = [
+    [60,  80],   // fast fill to 60%
+    [85, 300],   // slow to 85%
+    [95, 400],   // edge to 95%
+  ];
+  let delay = 0;
+  steps.forEach(([pct, dur]) => {
+    setTimeout(()=>{ if(bar) bar.style.width = pct+'%'; }, delay);
+    delay += dur;
+  });
+
+  // Finish & hide after projects load (or max 1.8s)
+  function finishLoader(){
+    if(bar) bar.style.width = '100%';
+    setTimeout(()=>{ if(loader) loader.classList.add('hidden'); }, 380);
+  }
+
+  const safetyTimer = setTimeout(finishLoader, 1800);
+
+  // Hook into loadPublicProjects to detect when done
+  const _origLPP = window.loadPublicProjects;
+  window.loadPublicProjects = async function(...args){
+    const result = await _origLPP(...args);
+    clearTimeout(safetyTimer);
+    finishLoader();
+    window.loadPublicProjects = _origLPP; // restore
+    return result;
+  };
+
   loadPublicProjects();
   initUploadZone();
   loadHeroStats();
@@ -1861,12 +2236,39 @@ window.toggleNotifPanel=async function(){
   if(!CU){panel.innerHTML='<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">Sign in to see briefs</div>';return;}
   panel.innerHTML='<div style="padding:16px;text-align:center;color:var(--text-muted);font-size:12px">Loading...</div>';
   try{
-    const q=query(collection(db,"inquiries"),where("creativeId","==",CU.uid));
-    const snap=await getDocs(q);
-    const notifDocs=snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
-    if(notifDocs.length===0){panel.innerHTML='<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">No briefs yet 📭</div>';return;}
-    const headerHTML=`<div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center"><span style="font-size:12px;font-weight:700;color:var(--text);letter-spacing:.5px">CLIENT BRIEFS</span><span style="font-size:11px;color:var(--text-muted)">${notifDocs.length} total</span></div>`;
-    const briefs=notifDocs.slice(0,5).map(i=>{
+    const [inqSnap, sysSnap] = await Promise.all([
+      getDocs(query(collection(db,"inquiries"), where("creativeId","==",CU.uid))),
+      getDocs(query(collection(db,"notifications"), where("userId","==",CU.uid)))
+    ]);
+    const inquiries  = inqSnap.docs.map(d=>({id:d.id,_type:'brief',...d.data()}));
+    const sysNotifs  = sysSnap.docs.map(d=>({id:d.id,_type:'system',...d.data()}));
+
+    // ── Render system notifications (pro activation etc.) ──
+    const sysHTML = sysNotifs
+      .sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0))
+      .map(n=>{
+        const isPro = n.type==='pro_activated';
+        const unread = !n.read;
+        return `<div style="padding:14px 16px;border-bottom:1px solid var(--border);background:${unread?'linear-gradient(135deg,rgba(255,92,0,0.07),rgba(255,140,66,0.04))':'var(--surface)'};position:relative;overflow:hidden">
+          ${unread?'<div style="position:absolute;top:0;left:0;width:3px;height:100%;background:var(--orange);border-radius:0 2px 2px 0"></div>':''}
+          <div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:10px">
+            <div style="width:38px;height:38px;border-radius:10px;background:${isPro?'linear-gradient(135deg,rgba(255,92,0,0.25),rgba(255,140,66,0.15))':'var(--surface2)'};display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;border:1px solid ${isPro?'rgba(255,92,0,0.3)':'var(--border)'}">⭐</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:2px">${n.title||'System Notification'}</div>
+              <div style="font-size:11px;color:var(--text-muted);line-height:1.5">${n.message||''}</div>
+            </div>
+            ${unread?'<span style="width:7px;height:7px;border-radius:50%;background:var(--orange);flex-shrink:0;margin-top:3px"></span>':''}
+          </div>
+          ${n.renewalMessage?`<div style="background:rgba(255,92,0,0.08);border:1px solid rgba(255,92,0,0.18);border-radius:8px;padding:8px 12px;font-size:11px;color:var(--text-muted);line-height:1.6;margin-bottom:8px">${n.renewalMessage}</div>`:''}
+          <div style="display:flex;gap:6px">
+            ${unread?`<button onclick="markSysNotifRead('${n.id}')" style="font-size:11px;background:var(--surface3);color:var(--text-muted);padding:6px 12px;border-radius:8px;border:1px solid var(--border);cursor:pointer;font-weight:500">✓ Mark Read</button>`:'<span style="font-size:10px;color:var(--text-light);padding:4px 0">✓ Read</span>'}
+          </div>
+        </div>`;
+      }).join('');
+
+    // ── Render briefs ──────────────────────────────────────
+    const notifDocs = inquiries.sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0));
+    const briefsHTML = notifDocs.slice(0,5).map(i=>{
       const isUnread=!i.read;
       return `<div style="padding:14px 16px;border-bottom:1px solid var(--border);${isUnread?'background:var(--surface2)':''}">
         <div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:8px">
@@ -1890,7 +2292,20 @@ window.toggleNotifPanel=async function(){
         </div>
       </div>`;
     }).join('');
-    panel.innerHTML=headerHTML+briefs+'<div style="padding:12px 16px;text-align:center"><button onclick="showPage(\'dashboard\');toggleNotifPanel();setTimeout(()=>document.getElementById(\'dashTabInquiries\').click(),200)" style="font-size:12px;color:var(--orange);background:none;border:none;cursor:pointer;font-weight:500">See all briefs →</button></div>';
+
+    const totalUnread = inquiries.filter(d=>!d.read).length + sysNotifs.filter(d=>!d.read).length;
+    const headerHTML = `<div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:12px;font-weight:700;color:var(--text);letter-spacing:.5px">NOTIFICATIONS</span>
+      ${totalUnread>0?`<span style="font-size:10px;background:var(--orange);color:white;border-radius:100px;padding:2px 8px;font-weight:700">${totalUnread} new</span>`:'<span style="font-size:11px;color:var(--text-muted)">All caught up ✓</span>'}
+    </div>`;
+
+    const hasAnything = sysNotifs.length>0 || notifDocs.length>0;
+    const emptyHTML = '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:13px">No notifications yet 📭</div>';
+    const sysSection = sysNotifs.length>0 ? `<div style="padding:8px 16px 4px;font-size:10px;font-weight:700;letter-spacing:1px;color:var(--text-muted);text-transform:uppercase">System</div>${sysHTML}` : '';
+    const briefSection = notifDocs.length>0 ? `<div style="padding:8px 16px 4px;font-size:10px;font-weight:700;letter-spacing:1px;color:var(--text-muted);text-transform:uppercase">Client Briefs</div>${briefsHTML}` : '';
+    const footer = notifDocs.length>0 ? `<div style="padding:12px 16px;text-align:center"><button onclick="showPage('dashboard');toggleNotifPanel();setTimeout(()=>document.getElementById('dashTabInquiries').click(),200)" style="font-size:12px;color:var(--orange);background:none;border:none;cursor:pointer;font-weight:500">See all briefs →</button></div>` : '';
+
+    panel.innerHTML = headerHTML + (hasAnything ? sysSection+briefSection+footer : emptyHTML);
   }catch(e){panel.innerHTML='<div style="padding:16px;color:var(--text-muted);font-size:12px">Error loading</div>';}
 };
 
@@ -1903,6 +2318,57 @@ document.addEventListener('click',e=>{
 </script>
 
 <style>
+/* ── SITE LOADER ────────────────────────────────── */
+#siteLoader{
+  position:fixed;inset:0;z-index:99999;
+  background:#0D0D0D;
+  display:flex;align-items:center;justify-content:center;
+  transition:opacity .5s ease, visibility .5s ease;
+}
+#siteLoader.hidden{
+  opacity:0;visibility:hidden;pointer-events:none;
+}
+.loader-inner{
+  display:flex;flex-direction:column;align-items:center;gap:20px;
+  user-select:none;
+}
+.loader-logo{
+  font-family:'Syne',sans-serif;
+  font-size:clamp(32px,6vw,52px);
+  font-weight:800;
+  color:#F0EEE8;
+  letter-spacing:-1.5px;
+  animation: loaderPulse 1.6s ease-in-out infinite;
+}
+.loader-logo span{ color:#FF5C00; }
+@keyframes loaderPulse{
+  0%,100%{ opacity:1; transform:scale(1); }
+  50%{ opacity:.75; transform:scale(.97); }
+}
+.loader-bar-wrap{
+  width:clamp(180px,40vw,280px);
+  height:3px;
+  background:rgba(255,255,255,0.08);
+  border-radius:99px;
+  overflow:hidden;
+}
+.loader-bar{
+  height:100%;
+  width:0%;
+  background:linear-gradient(90deg,#FF5C00,#ff8c42);
+  border-radius:99px;
+  transition:width .35s cubic-bezier(.4,0,.2,1);
+  box-shadow:0 0 10px rgba(255,92,0,.6);
+}
+.loader-tagline{
+  font-family:'DM Sans',sans-serif;
+  font-size:12px;
+  font-weight:500;
+  color:rgba(255,255,255,0.25);
+  letter-spacing:2px;
+  text-transform:uppercase;
+}
+
 :root{
   --orange:#FF5C00;--orange-pale:rgba(255,92,0,0.12);
   --bg:#0D0D0D;--bg2:#141414;--bg3:#1C1C1C;
@@ -1929,6 +2395,7 @@ body{font-family:var(--font-body);background:var(--bg);color:var(--text);min-hei
 .badge-gray{background:var(--surface2);color:var(--text-muted);border:1px solid var(--border);}
 .skeleton{background:linear-gradient(90deg,var(--surface) 25%,var(--surface2) 50%,var(--surface) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:8px;}
 @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
 @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,92,0,.4)}50%{box-shadow:0 0 0 6px rgba(255,92,0,0)}}
 
 /* NAV */
@@ -1941,25 +2408,36 @@ nav{position:sticky;top:0;z-index:200;background:rgba(13,13,13,.92);backdrop-fil
 .nav-actions{display:flex;gap:10px;align-items:center;}
 .avatar{border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;flex-shrink:0;}
 
-/* Mobile nav — logo only strip */
+
+/* Mobile nav — Timeliners style: hamburger + logo left, CTA right */
 @media(max-width:768px){
   nav{
-    height:48px;
-    padding:0 1rem;
-    justify-content:center;
-    border-bottom:1px solid rgba(255,255,255,0.05);
+    height: 52px;
+    padding: 0 14px;
+    justify-content: space-between;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    gap: 0;
   }
-  .nav-links,
-  .nav-actions,
-  .nav-hamburger{
-    display:none !important;
+  /* Show hamburger on mobile */
+  .nav-hamburger {
+    display: flex !important;
+    order: 0;
+    flex-shrink: 0;
   }
-  .nav-logo{
-    font-size:20px;
-    letter-spacing:-.3px;
+  .nav-logo {
+    font-size: 20px;
+    letter-spacing: -.3px;
+    order: 1;
+    flex: 1;
+    padding-left: 10px;
   }
-  /* Push pages down to account for slim top bar */
-  body{padding-top:0;}
+  /* Hide desktop links */
+  .nav-links { display: none !important; }
+  /* Mobile: hide ALL nav-actions — bottom nav handles everything */
+  .nav-actions { display: none !important; }
+  body { padding-top: 0; }
+  /* sticky filter top = nav height */
+  #discoverFilters { top: 52px !important; }
 }
 
 /* NOTIF */
@@ -1969,6 +2447,21 @@ nav{position:sticky;top:0;z-index:200;background:rgba(13,13,13,.92);backdrop-fil
 #notifDot{position:absolute;top:-2px;right:-2px;background:var(--orange);color:white;border-radius:50%;width:18px;height:18px;font-size:10px;font-weight:700;display:none;align-items:center;justify-content:center;border:2px solid var(--bg);}
 #navNotifBadge{position:absolute;top:-4px;right:-4px;background:var(--orange);color:white;border-radius:100px;min-width:18px;height:18px;padding:0 4px;font-size:10px;font-weight:700;display:none;align-items:center;justify-content:center;border:2px solid var(--bg);}
 #notifPanel{position:absolute;top:52px;right:0;width:320px;background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius);box-shadow:0 8px 32px rgba(0,0,0,.5);display:none;z-index:300;max-height:400px;overflow-y:auto;}
+
+@media(max-width:768px){
+  #notifPanel{
+    position:fixed !important;
+    top:auto !important;
+    bottom:62px !important;
+    left:0 !important;
+    right:0 !important;
+    width:100% !important;
+    max-height:70vh !important;
+    border-radius:20px 20px 0 0 !important;
+    border-bottom:none !important;
+    box-shadow:0 -8px 40px rgba(0,0,0,.6) !important;
+  }
+}
 
 /* HERO */
 .hero{padding:80px 2rem 60px;max-width:1200px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:60px;align-items:center;}
@@ -2315,19 +2808,18 @@ html{scroll-behavior:smooth;}
    RESPONSIVE BREAKPOINTS
 ═══════════════════════════════════════════════ */
 @media(max-width:768px){
-  .nav-hamburger{display:none!important;}
+  .nav-hamburger{display:flex!important;}
   .nav-links{display:none!important;}
   #navSignIn,#navJoin{display:none!important;}
   .nav-actions{display:none!important;}
   nav{padding:0 1rem;}
 
   /* ── HERO ── */
-  .hero{grid-template-columns:1fr;padding:28px 1rem 20px;gap:16px;}
-  .hero h1{font-size:30px;letter-spacing:-1px;margin-bottom:12px;}
-  .hero p{font-size:13px;margin-bottom:18px;line-height:1.5;}
-  .hero-eyebrow{font-size:11px;padding:5px 11px;margin-bottom:16px;}
-  .hero-cards-stack{display:none;}
-  .hero>div:last-child{display:none;}
+  .hero{grid-template-columns:1fr;padding:24px 1rem 20px;gap:0;}
+  .hero h1{font-size:28px;letter-spacing:-1px;margin-bottom:10px;}
+  .hero p{font-size:14px;margin-bottom:20px;line-height:1.6;}
+  .hero-eyebrow{font-size:11px;padding:5px 12px;margin-bottom:14px;}
+  /* hero responsive overridden below in mobile feed block */
 
   /* ── STATS BAR ── */
   .stats-inner{gap:0;justify-content:space-around;}
@@ -2336,59 +2828,135 @@ html{scroll-behavior:smooth;}
   .stats-bar{padding:12px 0.75rem;}
 
   /* ── SECTION ── */
-  .section{padding:16px 0 0;}
-  .section-header{flex-direction:column;align-items:flex-start;gap:8px;margin-bottom:10px;padding:0 12px;}
+  .section{padding:0 0 16px;}
+  .section-header{flex-direction:column;align-items:flex-start;gap:10px;margin-bottom:12px;padding:12px 12px 0;}
   .section-title{font-size:20px;}
+  #discoverSection{padding-top:0;}
 
-  /* ── FILTER TABS — sticky under nav ── */
-  #discoverFilters{
-    position:sticky;top:64px;z-index:100;
-    background:var(--bg);
-    border-bottom:1px solid var(--border);
-    padding:8px 12px 10px;
-    margin:0;
-    overflow-x:visible;
-    flex-wrap:wrap;
-    gap:6px;
-  }
-  .filter-tabs{flex-wrap:wrap;overflow-x:visible;padding-bottom:2px;gap:6px;}
-  .filter-tab{white-space:nowrap;flex-shrink:0;padding:6px 13px;font-size:12px;}
+  /* ══════════════════════════════════════════════
+     TIMELINERS-STYLE SINGLE COLUMN FEED — mobile
+  ═══════════════════════════════════════════════ */
 
-  /* ── DISCOVER FEED — YouTube-style vertical ── */
-  .portfolio-grid{
-    display:flex;
-    flex-direction:column;
-    gap:0;
-    padding:0;
-  }
-  .portfolio-card{
-    border-radius:0;
-    border-left:none;border-right:none;
-    border-top:none;
-    border-bottom:1px solid var(--border);
-    transform:none!important;
+  /* Hero — mobile compact version */
+  .hero { display: flex !important; flex-direction: column !important; padding: 20px 1rem 16px !important; gap: 0 !important; }
+  .hero-right-col { display: none !important; }
+  .hero > div:last-child { display: none !important; }
+  .hero > div:first-child { text-align: center; display: flex; flex-direction: column; align-items: center; }
+  .hero > div:first-child p { text-align: center; max-width: 100%; }
+  .hero h1 { font-size: 32px !important; letter-spacing: -1.5px !important; line-height: 1.08 !important; margin-bottom: 12px !important; }
+  .hero p { font-size: 14px !important; margin-bottom: 18px !important; line-height: 1.6 !important; color: var(--text-muted); }
+  .hero-eyebrow { font-size: 11px !important; margin-bottom: 16px !important; }
+  .hero > div:first-child > div:last-child { width: 100%; display: flex; gap: 8px; }
+  .hero > div:first-child .btn { flex: 1; justify-content: center; padding: 12px !important; font-size: 14px !important; }
+  /* Mobile hero cards — small horizontal row below text */
+  .hero-cards-stack { display: flex !important; position: static !important; width: 100% !important; height: auto !important; gap: 8px !important; overflow-x: auto !important; padding: 0 0 4px !important; scrollbar-width: none !important; margin-top: 20px !important; }
+  .hero-cards-stack::-webkit-scrollbar { display: none !important; }
+  .hero-card { position: static !important; transform: none !important; width: 160px !important; min-width: 160px !important; flex-shrink: 0 !important; padding: 12px !important; border-radius: 14px !important; }
+  .hero-card-thumb { height: 70px !important; border-radius: 8px !important; font-size: 24px !important; margin-bottom: 8px !important; }
+  .hero-card-name { font-size: 12px !important; }
+  .hero-card-role { font-size: 10px !important; }
+  .stats-bar { display: none !important; }
+  #discoverSection > .section-header { display: none !important; }
+
+  /* Filter tabs — slim, sticky, horizontal scroll pill row */
+  #discoverFilters {
+    position: sticky; top: 52px; z-index: 100;
     background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    gap: 6px;
+    padding: 10px 12px 10px !important;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    align-items: center;
   }
-  .portfolio-card:hover{transform:none!important;border-color:var(--border);}
-  /* YouTube-style 16:9 thumbnail */
-  .portfolio-thumb{
+  #discoverFilters::-webkit-scrollbar { display: none; }
+  #discoverFilters .filter-tab {
+    flex-shrink: 0;
+    white-space: nowrap;
+    padding: 6px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 100px;
+  }
+
+  /* SINGLE COLUMN FULL-WIDTH FEED */
+  .portfolio-grid {
+    grid-template-columns: 1fr !important;
+    gap: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* Card — full width, no border-radius on sides, divider between */
+  .portfolio-card {
+    border-radius: 0 !important;
+    border-left: none !important;
+    border-right: none !important;
+    border-top: none !important;
+    border-bottom: 1px solid var(--border) !important;
+    transform: none !important;
+  }
+  .portfolio-card:hover {
+    transform: none !important;
+    border-color: var(--border) !important;
+  }
+
+  /* Thumbnail — full width 16:9 */
+  .portfolio-thumb {
+    width: 100% !important;
     height: auto !important;
-    aspect-ratio: 16/9;
-    max-height: none !important;
+    aspect-ratio: 16 / 9 !important;
+    border-radius: 0 !important;
   }
-  .portfolio-thumb img,
-  .portfolio-thumb video {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
+
+  /* Info section — Timeliners style */
+  .portfolio-info {
+    padding: 10px 14px 14px !important;
   }
-  .portfolio-info{padding:10px 12px 14px;}
-  .portfolio-info-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:6px;}
-  .portfolio-title{font-size:14px;font-weight:700;line-height:1.3;}
-  .portfolio-stats{gap:10px;margin-top:8px;padding-top:8px;}
-  .pstat{font-size:12px;}
+  .portfolio-info-top {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 4px !important;
+    margin-bottom: 8px !important;
+  }
+  .portfolio-title {
+    font-size: 15px !important;
+    font-weight: 700 !important;
+    line-height: 1.35 !important;
+    color: var(--text) !important;
+  }
+  /* Category badge — inline after title */
+  .portfolio-info-top > .badge {
+    font-size: 11px !important;
+    padding: 3px 9px !important;
+    border-radius: 6px !important;
+  }
+
+  /* Creator row — visible, styled */
+  .portfolio-creator {
+    display: flex !important;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px !important;
+  }
+  .creator-name {
+    font-size: 13px !important;
+    color: var(--text-muted) !important;
+    font-weight: 500 !important;
+  }
+
+  /* Stats row */
+  .portfolio-stats {
+    display: flex !important;
+    gap: 14px;
+    margin-top: 8px !important;
+    padding-top: 8px !important;
+    border-top: 1px solid var(--border) !important;
+  }
+  .pstat { font-size: 12px !important; }
 
   /* ── CREATIVES GRID ── */
   .profile-grid{grid-template-columns:1fr 1fr;gap:10px;padding:0 12px 16px;}
@@ -2559,9 +3127,26 @@ html{scroll-behavior:smooth;}
   .footer-inner{grid-template-columns:1fr;gap:20px;padding:24px 1rem 20px;}
   .footer-bottom{flex-direction:column;gap:6px;text-align:center;padding:14px 1rem;}
 
-  /* ── MODAL ── */
-  .modal{padding:20px 16px;border-radius:16px;}
-  .modal-title{font-size:17px;}
+  /* ── MODAL — full screen bottom sheet with drag handle ── */
+  .modal-overlay{ padding:0; align-items:flex-end; }
+  .modal{
+    border-radius:20px 20px 0 0 !important;
+    max-height:92vh;
+    padding:0 14px 32px !important;
+    overflow-y:auto;
+    -webkit-overflow-scrolling:touch;
+  }
+  /* Drag handle at top of every modal */
+  .modal::before{
+    content:'';
+    display:block;
+    width:36px;height:4px;
+    background:var(--border2);
+    border-radius:2px;
+    margin:12px auto 16px;
+    flex-shrink:0;
+  }
+  .modal-title{font-size:18px;margin-top:0;}
   .form-row{grid-template-columns:1fr;}
   .ep-grid{grid-template-columns:1fr;}
   #modal-editprofile .modal{max-width:100%;}
@@ -2577,13 +3162,11 @@ html{scroll-behavior:smooth;}
 }
 
 @media(max-width:480px){
-  /* Feed stays single column, already flex */
   .profile-grid{grid-template-columns:1fr 1fr;}
   .dash-stats-row{grid-template-columns:1fr 1fr;}
   .hero h1{font-size:26px;}
   .stat-num{font-size:18px;}
   .stat-label{font-size:10px;}
-  .portfolio-thumb{height:60vw;}
 }
 
 @media(max-width:640px){
@@ -2595,15 +3178,6 @@ html{scroll-behavior:smooth;}
    EDIT PROFILE MODAL — Mobile Polish
 ═══════════════════════════════════════════════ */
 @media(max-width:768px){
-  /* Modal overlay full screen on mobile */
-  .modal-overlay{ padding:0; align-items:flex-end; }
-  .modal{
-    border-radius:20px 20px 0 0 !important;
-    max-height:92vh;
-    padding:20px 14px 32px !important;
-    overflow-y:auto;
-    -webkit-overflow-scrolling:touch;
-  }
   /* Edit profile grid: single column */
   .ep-grid{ grid-template-columns:1fr !important; gap:12px !important; }
 
@@ -2726,12 +3300,13 @@ html{scroll-behavior:smooth;}
   position: fixed;
   bottom: 0; left: 0; right: 0;
   height: 62px;
-  background: rgba(14,14,14,0.97);
+  background: rgba(10,10,10,0.98);
   border-top: 1px solid rgba(255,255,255,0.07);
   z-index: 200;
   align-items: stretch;
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 .mbn-item {
   flex: 1;
@@ -2815,9 +3390,9 @@ html{scroll-behavior:smooth;}
 
 @media(max-width:768px){
   #mobileBottomNav { display: flex; }
-  /* Push page content above bottom nav */
-  body { padding-bottom: 62px; }
-  .toast { bottom: 76px; }
+  /* Push page content above bottom nav - include safe area */
+  body { padding-bottom: calc(62px + env(safe-area-inset-bottom, 0px)); }
+  .toast { bottom: calc(72px + env(safe-area-inset-bottom, 0px)); left:12px; right:12px; text-align:center; }
 
   /* ── MOBILE PROJECT VIEWER — fullscreen bottom sheet ── */
   #mediaViewerOverlay {
@@ -2837,7 +3412,7 @@ html{scroll-behavior:smooth;}
   #mediaViewerContent img,
   #mediaViewerContent video {
     border-radius: 0 !important;
-    max-height: 52vw !important;
+    max-height: 56vw !important;
     width: 100% !important;
     object-fit: cover !important;
   }
@@ -2881,14 +3456,26 @@ html{scroll-behavior:smooth;}
 </head>
 <body>
 
+<!-- ── LOADING SCREEN ─────────────────────────────── -->
+<div id="siteLoader">
+  <div class="loader-inner">
+    <div class="loader-logo">Creativo<span>.</span></div>
+    <div class="loader-bar-wrap">
+      <div class="loader-bar" id="loaderBar"></div>
+    </div>
+    <div class="loader-tagline">Sri Lanka's Creative Platform</div>
+  </div>
+</div>
+
 <!-- NAV -->
 <nav>
   <div class="nav-logo" onclick="showPage('discover')">Creativo<span>.</span></div>
   <ul class="nav-links">
     <li><a class="active" onclick="showPage('discover');setActive(this)">Discover</a></li>
-    <li><a onclick="showPage('creatives');setActive(this);loadPublicCreatives()">Creatives</a></li>
+    <li><a onclick="showPage('creatives');setActive(this);loadPublicCreatives()">Creators</a></li>
     <li><a onclick="showPage('jobs');setActive(this);loadJobs()">Jobs</a></li>
     <li><a onclick="showPage('pricing');setActive(this)">Pricing</a></li>
+    <li><a onclick="showPage('faq');setActive(this)">FAQ</a></li>
   </ul>
   <div class="nav-actions">
     <div class="notif-wrap" style="position:relative">
@@ -2931,13 +3518,16 @@ html{scroll-behavior:smooth;}
         <div class="nm-link-icon">🔍</div> Discover
       </button>
       <button class="nm-link" onclick="showPage('creatives');loadPublicCreatives();closeMobileNav()">
-        <div class="nm-link-icon">👥</div> Creatives
+        <div class="nm-link-icon">👥</div> Creators
       </button>
       <button class="nm-link" onclick="showPage('jobs');loadJobs();closeMobileNav()">
         <div class="nm-link-icon">💼</div> Jobs
       </button>
       <button class="nm-link" onclick="showPage('pricing');closeMobileNav()">
         <div class="nm-link-icon">💎</div> Pricing
+      </button>
+      <button class="nm-link" onclick="showPage('faq');closeMobileNav()">
+        <div class="nm-link-icon">❓</div> FAQ
       </button>
       <!-- Auth-only links injected below -->
       <div id="nmAuthLinks"></div>
@@ -2964,7 +3554,7 @@ html{scroll-behavior:smooth;}
         <button class="btn btn-ghost" style="font-size:15px;padding:12px 24px" onclick="document.getElementById('discoverSection').scrollIntoView({behavior:'smooth'})">Browse Work</button>
       </div>
     </div>
-    <div style="position:relative;height:420px;display:flex;align-items:center;justify-content:center">
+    <div class="hero-right-col" style="position:relative;display:flex;align-items:center;justify-content:center">
       <div class="hero-cards-stack">
         <div class="hero-card"><div class="hero-card-thumb" style="background:linear-gradient(135deg,#667eea,#764ba2)">🎨</div><div class="hero-card-name">Tharaka Silva</div><div class="hero-card-role">Brand Designer · Colombo</div><div style="margin-top:8px"><span class="badge badge-purple">Graphic Design</span></div></div>
         <div class="hero-card"><div class="hero-card-thumb" style="background:linear-gradient(135deg,#f093fb,#f5576c)">🎬</div><div class="hero-card-name">Rashmi Fernando</div><div class="hero-card-role">Motion Designer · Kandy</div><div style="margin-top:8px"><span class="badge badge-orange">Motion</span></div></div>
@@ -2973,7 +3563,7 @@ html{scroll-behavior:smooth;}
     </div>
   </div>
   <div class="stats-bar"><div class="stats-inner">
-    <div class="stat-item"><div class="stat-num" id="statCreatives">—</div><div class="stat-label">Active Creatives</div></div>
+    <div class="stat-item"><div class="stat-num" id="statCreatives">—</div><div class="stat-label">Active Creators</div></div>
     <div class="stat-item"><div class="stat-num" id="statProjects">—</div><div class="stat-label">Projects Published</div></div>
     <div class="stat-item"><div class="stat-num" id="statClients">—</div><div class="stat-label">Clients & Brands</div></div>
     <div class="stat-item"><div class="stat-num" id="statHireRate">—</div><div class="stat-label">Hire Rate (Pro)</div></div>
@@ -2981,7 +3571,8 @@ html{scroll-behavior:smooth;}
   <div class="section" id="discoverSection">
     <div class="section-header">
       <div class="section-title">Discover <span>Work</span></div>
-      <div class="filter-tabs" id="discoverFilters">
+    </div>
+    <div class="filter-tabs" id="discoverFilters" style="padding:0 2rem 16px;gap:8px;flex-wrap:wrap;display:flex;">
         <div class="filter-tab active" onclick="filterProjects('all',this)">All</div>
         <div class="filter-tab" onclick="filterProjects('Graphic Design',this)">Graphic Design</div>
         <div class="filter-tab" onclick="filterProjects('Video Edit',this)">Video Edit</div>
@@ -2991,7 +3582,6 @@ html{scroll-behavior:smooth;}
         <div class="filter-tab" onclick="filterProjects('Reels / Shorts',this)">Reels</div>
         <div class="filter-tab" onclick="filterProjects('Wedding & Events',this)">Wedding</div>
       </div>
-    </div>
     <div class="portfolio-grid" id="projectGrid" style="padding-bottom:24px"></div>
   </div>
 </div>
@@ -3000,7 +3590,7 @@ html{scroll-behavior:smooth;}
 <div class="page" id="page-creatives">
   <div class="section">
     <div class="section-header">
-      <div class="section-title">Find <span>Creatives</span></div>
+      <div class="section-title">Find <span>Creators</span></div>
       <div class="filter-tabs" id="creativeFilters">
         <div class="filter-tab active" onclick="loadPublicCreatives('all');setTabActive(this,'creativeFilters')">All</div>
         <div class="filter-tab" onclick="loadPublicCreatives('graphic');setTabActive(this,'creativeFilters')">Graphic Designers</div>
@@ -3008,7 +3598,7 @@ html{scroll-behavior:smooth;}
         <div class="filter-tab" onclick="loadPublicCreatives('motion');setTabActive(this,'creativeFilters')">Motion Artists</div>
       </div>
     </div>
-    <div class="profile-grid" id="creativesGrid"><div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text-muted)">Loading creatives...</div></div>
+    <div class="profile-grid" id="creativesGrid"><div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text-muted)">Loading creators...</div></div>
   </div>
 </div>
 
@@ -3237,7 +3827,7 @@ html{scroll-behavior:smooth;}
     <div>
       <div class="footer-brand-name">Creativo<span>.</span></div>
       <div class="footer-brand-desc">Sri Lanka's portfolio platform for graphic designers and video editors.</div>
-      <div style="margin-top:20px"><a href="https://wa.me/94720191167" class="btn btn-primary btn-sm" style="background:#25D366;border-color:#25D366">💬 WhatsApp Us</a></div>
+      <div style="margin-top:20px"><a href="https://wa.me/94723961127" class="btn btn-primary btn-sm" style="background:#25D366;border-color:#25D366">💬 WhatsApp Us</a></div>
     </div>
     <div class="footer-col"><h4>Platform</h4><ul>
       <li><a onclick="showPage('discover')">Discover Work</a></li>
@@ -3251,7 +3841,7 @@ html{scroll-behavior:smooth;}
       <li><a onclick="showPage('dashboard');loadDashboard()">Dashboard</a></li>
     </ul></div>
     <div class="footer-col"><h4>Support</h4><ul>
-      <li><a>FAQ</a></li><li><a>Contact Us</a></li><li><a>Privacy Policy</a></li><li><a>Terms of Use</a></li>
+      <li><a onclick="showPage('faq')">FAQ</a></li><li><a onclick="showPage('contact')">Contact Us</a></li><li><a>Privacy Policy</a></li><li><a>Terms of Use</a></li>
     </ul></div>
   </div>
   <div class="footer-bottom">
@@ -3318,7 +3908,7 @@ html{scroll-behavior:smooth;}
       </select>
     </div>
     <div class="form-group"><label class="form-label">Year</label>
-      <select class="form-select"><option>2025</option><option>2024</option><option>2023</option></select>
+      <input type="number" id="up_year" class="form-input" placeholder="e.g. 2024" min="1990" max="2099" value="2025" style="width:100%">
     </div>
   </div>
   <div class="form-group"><label class="form-label">Description</label><textarea id="up_desc" class="form-textarea" rows="3" placeholder="Tell us about this project…"></textarea></div>
@@ -3559,7 +4149,7 @@ html{scroll-behavior:smooth;}
     <div style="font-family:var(--font-display);font-size:28px;font-weight:800;color:var(--text)">LKR 2,490 <span style="font-size:14px;font-weight:400;color:var(--text-muted)">/month</span></div>
     <div style="font-size:12px;color:var(--text-muted);margin-top:4px">or LKR 24,900/year (save 2 months)</div>
   </div>
-  <a href="https://wa.me/94720191167?text=Hi!%20I%20want%20to%20upgrade%20to%20Creativo%20Pro" target="_blank" class="btn" style="width:100%;justify-content:center;padding:12px;background:#25D366;color:white;border:none;font-size:15px">💬 WhatsApp Us to Upgrade</a>
+  <a id="upgradeWaBtn" href="https://wa.me/94723961127?text=Hi!%20I%20want%20to%20upgrade%20to%20Creativo%20Pro" target="_blank" class="btn" style="width:100%;justify-content:center;padding:12px;background:#25D366;color:white;border:none;font-size:15px">💬 WhatsApp Us to Upgrade</a>
   <p style="font-size:12px;color:var(--text-muted);margin-top:12px">Activated within 24 hrs after payment</p>
 </div>
 </div>
@@ -3705,7 +4295,7 @@ html{scroll-behavior:smooth;}
         <path d="M13.5 20c0-2.5 1.6-4.5 3.5-4.5s3.5 2 3.5 4.5"/>
       </svg>
     </div>
-    <div class="mbn-label">Creatives</div>
+    <div class="mbn-label">Creators</div>
   </button>
   <button class="mbn-item" id="mbn-upload" onclick="mbnUploadTap()">
     <span style="font-family:'Syne',sans-serif;font-size:12px;font-weight:800;color:var(--text);letter-spacing:-0.4px;line-height:1">Creativo<span style="color:var(--orange)">.</span></span>
@@ -3736,11 +4326,16 @@ html{scroll-behavior:smooth;}
 <script>
 // ── PAGE NAV ────────────────────────────────────────────────
 function showPage(name){
+  // Pause all discover video previews when leaving discover page
+  if(name !== 'discover'){
+    document.querySelectorAll('#projectGrid .hover-preview').forEach(v=>{ v.pause(); v.currentTime=0; });
+  }
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.getElementById('page-'+name).classList.add('active');
   window.scrollTo(0,0);
   if(name==='dashboard'&&window.loadDashboard) window.loadDashboard();
   if(name==='jobs'&&window.loadJobs) window.loadJobs();
+  if(name==='discover') requestAnimationFrame(()=>requestAnimationFrame(setupVideoAutoplay));
 }
 
 // ── MOBILE NAV ───────────────────────────────────────────────
@@ -3821,7 +4416,22 @@ function setTabActive(el,containerId){
   document.getElementById(containerId).querySelectorAll('.filter-tab').forEach(t=>t.classList.remove('active'));
   el.classList.add('active');
 }
-function openModal(name){ document.getElementById('modal-'+name).classList.add('open'); }
+function openModal(name){
+  document.getElementById('modal-'+name).classList.add('open');
+  if(name === 'upgrade'){
+    const btn = document.getElementById('upgradeWaBtn');
+    if(btn){
+      const firstName = window.CUD?.firstName || '';
+      const lastName  = window.CUD?.lastName  || '';
+      const email     = window.CU?.email      || '';
+      const fullName  = (firstName + ' ' + lastName).trim();
+      let msg = 'Hi! I want to upgrade to Creativo Pro';
+      if(fullName) msg += '%0AName%3A ' + encodeURIComponent(fullName);
+      if(email)    msg += '%0AEmail%3A ' + encodeURIComponent(email);
+      btn.href = 'https://wa.me/94723961127?text=' + msg;
+    }
+  }
+}
 function closeModal(name){ document.getElementById('modal-'+name).classList.remove('open'); }
 document.querySelectorAll('.modal-overlay').forEach(o=>{
   o.addEventListener('click',e=>{ if(e.target===o) o.classList.remove('open'); });
@@ -4135,5 +4745,354 @@ window.showPage = function(name){
 const _origUpdateNavLoggedIn = window.updateNavLoggedIn;
 document.addEventListener('_navUpdated', updateMobileBottomNav);
 </script>
+
+<!-- ══════════════════════════════════════════════
+     FAQ PAGE
+════════════════════════════════════════════════ -->
+<div class="page" id="page-faq">
+<div id="faq-scroll-area">
+  <div class="section" style="max-width:760px;margin:0 auto;padding-top:60px;padding-bottom:80px">
+
+    <!-- Header -->
+    <div style="text-align:center;margin-bottom:52px">
+      <div class="badge badge-orange" style="font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:16px">FAQ</div>
+      <div class="section-title" style="font-size:36px;margin-bottom:14px">Frequently Asked <span>Questions</span></div>
+      <p style="color:var(--text-muted);font-size:15px;max-width:480px;margin:0 auto">Everything you need to know about Creativo, plans, and how it all works.</p>
+    </div>
+
+    <!-- Getting Started -->
+    <div class="faq-category-label">Getting Started</div>
+    <div class="faq-list">
+      <div class="faq-item" onclick="toggleFaq(this)">
+        <div class="faq-question">What is Creativo?<span class="faq-icon">+</span></div>
+        <div class="faq-answer">Creativo is Sri Lanka's portfolio platform built for graphic designers and video editors. Upload your work, get discovered by brands and clients, and grow your creative career — all in one place.</div>
+      </div>
+      <div class="faq-item" onclick="toggleFaq(this)">
+        <div class="faq-question">Is it free to create an account?<span class="faq-icon">+</span></div>
+        <div class="faq-answer">Yes! Creating an account is completely free. You can publish up to 3 projects, get a public profile page, and appear in search — no credit card needed.</div>
+      </div>
+      <div class="faq-item" onclick="toggleFaq(this)">
+        <div class="faq-question">How do I create an account?<span class="faq-icon">+</span></div>
+        <div class="faq-answer">Click the "Join Free" button in the top navigation. Fill in your name, email, specialty, and a password. Your profile goes live instantly after signing up.</div>
+      </div>
+      <div class="faq-item" onclick="toggleFaq(this)">
+        <div class="faq-question">Can I sign back in with my password?<span class="faq-icon">+</span></div>
+        <div class="faq-answer">Yes. Use the "Sign In" button and enter the email and password you registered with. If you forget your password, contact us via WhatsApp and we'll help you reset it.</div>
+      </div>
+    </div>
+
+    <!-- Plans & Payments -->
+    <div class="faq-category-label" style="margin-top:48px">Plans &amp; Payments</div>
+    <div class="faq-list">
+      <div class="faq-item" onclick="toggleFaq(this)">
+        <div class="faq-question">What's the difference between the plans?<span class="faq-icon">+</span></div>
+        <div class="faq-answer">The Free plan lets you publish up to 3 projects and appear in search. The Pro plan (LKR 2,490/mo) unlocks unlimited projects, a verified badge, full analytics, priority in search, social links, an inquiry inbox, and exclusive profile customisation features like animated name styles and profile frames.</div>
+      </div>
+      <div class="faq-item" onclick="toggleFaq(this)">
+        <div class="faq-question">How does payment work?<span class="faq-icon">+</span></div>
+        <div class="faq-answer">Payment is made via bank transfer. Once you initiate an upgrade, you'll receive our bank details. After transferring, send us a WhatsApp confirmation and your Pro account will be activated within 24 hours.</div>
+      </div>
+      <div class="faq-item" onclick="toggleFaq(this)">
+        <div class="faq-question">Can I cancel my subscription?<span class="faq-icon">+</span></div>
+        <div class="faq-answer">Yes. You can cancel anytime by messaging us on WhatsApp. Your Pro features will remain active until the end of your current billing period.</div>
+      </div>
+      <div class="faq-item" onclick="toggleFaq(this)">
+        <div class="faq-question">Can I upgrade or downgrade my plan?<span class="faq-icon">+</span></div>
+        <div class="faq-answer">Absolutely. You can upgrade to Pro anytime from the Pricing page. To downgrade, reach out to us on WhatsApp and we'll process it before your next billing cycle.</div>
+      </div>
+    </div>
+
+    <!-- Portfolio & Projects -->
+    <div class="faq-category-label" style="margin-top:48px">Portfolio &amp; Projects</div>
+    <div class="faq-list">
+      <div class="faq-item" onclick="toggleFaq(this)">
+        <div class="faq-question">How do I upload a project?<span class="faq-icon">+</span></div>
+        <div class="faq-answer">Sign in and click the "+ Upload Project" button from your Dashboard. Add a title, category, description, and your project file (image or video). You can also add a custom thumbnail. Hit Publish and your work goes live immediately.</div>
+      </div>
+      <div class="faq-item" onclick="toggleFaq(this)">
+        <div class="faq-question">What file types can I upload?<span class="faq-icon">+</span></div>
+        <div class="faq-answer">You can upload images (JPG, PNG, GIF, WebP) and video files (MP4, MOV). Free accounts support files up to 50 MB; Pro accounts support up to 250 MB per file.</div>
+      </div>
+      <div class="faq-item" onclick="toggleFaq(this)">
+        <div class="faq-question">Can I edit or delete a project after uploading?<span class="faq-icon">+</span></div>
+        <div class="faq-answer">You can delete a project from your Dashboard at any time. Full project editing (title, description, cover) is coming soon. For urgent edits, message us on WhatsApp.</div>
+      </div>
+      <div class="faq-item" onclick="toggleFaq(this)">
+        <div class="faq-question">How do clients contact me?<span class="faq-icon">+</span></div>
+        <div class="faq-answer">Your profile features a "Hire Me" button that lets clients send you a brief directly. Pro users receive these in a dedicated Inquiry Inbox inside their Dashboard, with unread notifications.</div>
+      </div>
+    </div>
+
+    <!-- Still have questions -->
+    <div style="text-align:center;margin-top:64px;padding:40px 32px;background:var(--surface);border:1px solid var(--border2);border-radius:20px">
+      <div style="font-size:28px;margin-bottom:12px">💬</div>
+      <div style="font-family:var(--font-display);font-size:18px;font-weight:700;color:var(--text);margin-bottom:8px">Still have a question?</div>
+      <p style="color:var(--text-muted);font-size:14px;margin-bottom:20px">We're happy to help. Reach out via WhatsApp or our contact form.</p>
+      <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+        <a href="https://wa.me/94723961127" class="btn btn-primary" style="background:#25D366;border-color:#25D366">💬 WhatsApp Us</a>
+        <button class="btn btn-ghost" onclick="showPage('contact')">Contact Form →</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CONTACT US PAGE
+════════════════════════════════════════════════ -->
+<div class="page" id="page-contact">
+  <div class="section" style="max-width:680px;margin:0 auto;padding-top:60px;padding-bottom:80px">
+
+    <!-- Header -->
+    <div style="text-align:center;margin-bottom:48px">
+      <div class="badge badge-orange" style="font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:16px">Contact Us</div>
+      <div class="section-title" style="font-size:36px;margin-bottom:14px">Get in <span>Touch</span></div>
+      <p style="color:var(--text-muted);font-size:15px;max-width:420px;margin:0 auto">Have a question, suggestion, or need help? We'd love to hear from you.</p>
+    </div>
+
+    <!-- Contact cards row -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:48px">
+      <a href="https://wa.me/94723961127" class="contact-channel-card" style="text-decoration:none">
+        <div class="contact-channel-icon" style="background:rgba(37,211,102,0.12);color:#25D366">
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
+        </div>
+        <div style="font-size:13px;font-weight:600;color:var(--text)">WhatsApp</div>
+        <div style="font-size:11px;color:var(--text-muted)">+94 72 396 1127</div>
+      </a>
+      <div class="contact-channel-card">
+        <div class="contact-channel-icon" style="background:var(--orange-pale);color:var(--orange)">
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+        </div>
+        <div style="font-size:13px;font-weight:600;color:var(--text)">Email</div>
+        <div style="font-size:11px;color:var(--text-muted)">hello@creativo.lk</div>
+      </div>
+      <div class="contact-channel-card">
+        <div class="contact-channel-icon" style="background:rgba(131,58,180,0.12);color:#e1306c">
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z"/></svg>
+        </div>
+        <div style="font-size:13px;font-weight:600;color:var(--text)">Instagram</div>
+        <div style="font-size:11px;color:var(--text-muted)">@creativo.lk</div>
+      </div>
+    </div>
+
+    <!-- Contact Form -->
+    <div style="background:var(--surface);border:1px solid var(--border2);border-radius:20px;padding:36px 32px">
+      <div style="font-family:var(--font-display);font-size:18px;font-weight:700;color:var(--text);margin-bottom:6px">Send us a message</div>
+      <div style="font-size:13px;color:var(--text-muted);margin-bottom:28px">We'll get back to you within 24 hours.</div>
+
+      <div class="form-group">
+        <label class="form-label">Your Name</label>
+        <input type="text" id="ct_name" class="form-input" placeholder="Kasun Perera">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Email Address</label>
+        <input type="email" id="ct_email" class="form-input" placeholder="you@example.com">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Subject</label>
+        <select id="ct_subject" class="form-select">
+          <option value="">Select a topic</option>
+          <option>Account Issue</option>
+          <option>Billing / Payment</option>
+          <option>Report a Bug</option>
+          <option>Feature Request</option>
+          <option>Partnership / Business</option>
+          <option>Other</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Message</label>
+        <textarea id="ct_message" class="form-input" rows="5" placeholder="Tell us how we can help…" style="resize:vertical;min-height:120px"></textarea>
+      </div>
+      <button class="btn btn-primary" style="width:100%;justify-content:center;padding:13px;font-size:15px;margin-top:8px" onclick="submitContactForm()">Send Message</button>
+      <div id="ct_success" style="display:none;margin-top:16px;padding:14px 18px;background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.25);border-radius:10px;color:#4ade80;font-size:14px;text-align:center">
+        ✅ Message sent! We'll get back to you soon.
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- FAQ + CONTACT CSS & JS -->
+<style>
+/* ── FAQ FULL-VIEWPORT ──────────────────────── */
+#page-faq{
+  height: calc(100vh - 64px);
+  overflow: hidden;
+  display: none;
+}
+#page-faq.active{
+  display: flex;
+  flex-direction: column;
+}
+/* Hide footer on FAQ and Contact pages */
+#page-faq.active ~ footer,
+#page-contact.active ~ footer,
+body:has(#page-faq.active) footer,
+body:has(#page-contact.active) footer {
+  display: none !important;
+}
+#faq-scroll-area{
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border2) transparent;
+}
+#faq-scroll-area::-webkit-scrollbar{ width:5px; }
+#faq-scroll-area::-webkit-scrollbar-track{ background:transparent; }
+#faq-scroll-area::-webkit-scrollbar-thumb{ background:var(--border2);border-radius:4px; }
+
+/* ── FAQ ─────────────────────────────────────── */
+.faq-category-label{
+  font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;
+  color:var(--text-muted);margin-bottom:14px;
+}
+.faq-list{ display:flex;flex-direction:column;gap:0; }
+.faq-item{
+  border-bottom:1px solid var(--border);
+  cursor:pointer;transition:background .15s;
+}
+.faq-item:first-child{ border-top:1px solid var(--border); }
+.faq-question{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:18px 4px;
+  font-size:15px;font-weight:500;color:var(--text);
+  user-select:none;gap:16px;
+}
+.faq-icon{
+  font-size:22px;font-weight:300;color:var(--text-muted);
+  flex-shrink:0;line-height:1;
+  transition:transform .25s,color .2s;
+}
+.faq-item.open .faq-icon{ transform:rotate(45deg); color:var(--orange); }
+.faq-item.open .faq-question{ color:var(--orange); }
+.faq-answer{
+  max-height:0;overflow:hidden;
+  font-size:14px;color:var(--text-muted);line-height:1.7;
+  padding:0 4px;
+  transition:max-height .35s ease,padding .3s ease,opacity .3s;
+  opacity:0;
+}
+.faq-item.open .faq-answer{
+  max-height:300px;
+  padding:0 4px 20px;
+  opacity:1;
+}
+
+/* ── CONTACT CHANNEL CARDS ───────────────────── */
+.contact-channel-card{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:16px;padding:24px 20px;
+  display:flex;flex-direction:column;align-items:center;gap:10px;
+  text-align:center;cursor:default;
+  transition:border-color .2s,transform .2s;
+}
+.contact-channel-card:hover{
+  border-color:var(--border2);transform:translateY(-2px);
+}
+.contact-channel-icon{
+  width:48px;height:48px;border-radius:12px;
+  display:flex;align-items:center;justify-content:center;
+}
+
+@media(max-width:600px){
+  #page-faq .section, #page-contact .section{ padding-left:20px;padding-right:20px; }
+  #page-contact .form-row-contact{ flex-direction:column; }
+  #page-contact [style*="padding:36px 32px"]{ padding:24px 18px !important; }
+}
+</style>
+
+<script>
+function toggleFaq(item){
+  const isOpen = item.classList.contains('open');
+  // Close all
+  document.querySelectorAll('.faq-item.open').forEach(i=>i.classList.remove('open'));
+  // Toggle clicked
+  if(!isOpen) item.classList.add('open');
+}
+
+// Hide footer on FAQ/Contact pages, show on others
+const _footer = document.querySelector('footer');
+const _noFooterPages = ['faq','contact'];
+const _origSP = window.showPage;
+window.showPage = function(name){
+  _origSP(name);
+  if(_footer) _footer.style.display = _noFooterPages.includes(name) ? 'none' : '';
+};
+
+window.submitContactForm = function(){
+  const name  = document.getElementById('ct_name').value.trim();
+  const email = document.getElementById('ct_email').value.trim();
+  const subj  = document.getElementById('ct_subject').value;
+  const msg   = document.getElementById('ct_message').value.trim();
+  if(!name||!email||!subj||!msg){
+    if(typeof showToast==='function') showToast('⚠️ Please fill all fields');
+    return;
+  }
+  // WhatsApp redirect with pre-filled message
+  const text = encodeURIComponent(`*Creativo Contact Form*\n\nName: ${name}\nEmail: ${email}\nSubject: ${subj}\n\n${msg}`);
+  window.open('https://wa.me/94723961127?text='+text,'_blank');
+  document.getElementById('ct_success').style.display='block';
+  document.getElementById('ct_name').value='';
+  document.getElementById('ct_email').value='';
+  document.getElementById('ct_subject').value='';
+  document.getElementById('ct_message').value='';
+};
+</script>
+
+<!-- ── JOB AD BANNER ─────────────────────────────────────── -->
+<div id="jobAdBanner" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:9000;
+  background:linear-gradient(135deg,#1a1a1a 0%,#1e1e1e 100%);
+  border-top:1px solid rgba(255,92,0,0.35);
+  box-shadow:0 -4px 32px rgba(0,0,0,0.5);
+  padding:0;">
+  <!-- Ticker tape wrapper -->
+  <div style="overflow:hidden;white-space:nowrap;position:relative;padding:12px 0;cursor:pointer;" onclick="showPage('jobs');loadJobs();document.getElementById('jobAdBanner').dataset.clicked='1'">
+    <div id="jobAdTicker" style="display:inline-block;animation:jobTicker 22s linear infinite;padding-left:100%;">
+    </div>
+    <div id="jobAdTicker2" style="display:inline-block;animation:jobTicker 22s linear infinite;padding-left:60px;animation-delay:-11s;">
+    </div>
+  </div>
+  <!-- Close button -->
+  <button onclick="event.stopPropagation();document.getElementById('jobAdBanner').style.display='none'"
+    style="position:absolute;top:50%;right:12px;transform:translateY(-50%);
+    background:rgba(255,255,255,0.07);border:none;color:rgba(255,255,255,0.45);
+    width:24px;height:24px;border-radius:50%;cursor:pointer;font-size:13px;
+    display:flex;align-items:center;justify-content:center;line-height:1;">×</button>
+</div>
+
+<style>
+@keyframes jobTicker {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-100%); }
+}
+#jobAdBanner .ticker-item {
+  display:inline-flex;align-items:center;gap:8px;
+  font-size:13px;font-weight:600;color:rgba(255,255,255,0.85);
+  padding:0 32px;
+}
+#jobAdBanner .ticker-item .ti-icon {
+  font-size:15px;
+}
+#jobAdBanner .ticker-item .ti-title {
+  color:#fff;font-weight:700;
+}
+#jobAdBanner .ticker-item .ti-company {
+  color:rgba(255,255,255,0.5);font-weight:400;
+}
+#jobAdBanner .ticker-item .ti-new {
+  background:var(--orange);color:#fff;font-size:10px;font-weight:800;
+  padding:2px 7px;border-radius:100px;letter-spacing:.4px;
+}
+#jobAdBanner .ticker-sep {
+  display:inline-block;color:rgba(255,92,0,0.5);font-size:16px;padding:0 4px;
+}
+/* On mobile push page content up */
+@media(max-width:768px){
+  #jobAdBanner { padding-bottom: env(safe-area-inset-bottom, 0); }
+}
+</style>
+
 </body>
 </html>
