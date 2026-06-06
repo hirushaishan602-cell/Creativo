@@ -217,6 +217,143 @@ window.doSignOut = async function(){
   showToast('Signed out.');
 };
 
+// ── ANNOUNCEMENT FIREBASE BRIDGE ─────────────────────────────
+// ── PRICING FIREBASE BRIDGE ──────────────────────────────────
+// Pricing config doc: db/siteConfig/pricing  { freePrice, freePeriod, proPrice, proPeriod }
+async function loadPricingConfig(){
+  try{
+    const snap = await getDoc(doc(db,'siteConfig','pricing'));
+    const d = snap.exists() ? snap.data() : {};
+    const fv = document.getElementById('priceFreeVal');
+    const fp = document.getElementById('priceFreePeriod');
+    const pv = document.getElementById('priceProVal');
+    const pp = document.getElementById('priceProPeriod');
+    // Pricing inputs (admin panel)
+    const fi = document.getElementById('priceFreeInput');
+    const fpi = document.getElementById('priceFreePeriodInput');
+    const pi = document.getElementById('priceProInput');
+    const ppi = document.getElementById('priceProPeriodInput');
+    if(fv && d.freePrice !== undefined) fv.textContent = Number(d.freePrice).toLocaleString();
+    if(fp && d.freePeriod) fp.textContent = d.freePeriod;
+    if(pv && d.proPrice !== undefined) pv.textContent = Number(d.proPrice).toLocaleString();
+    if(pp && d.proPeriod) pp.textContent = d.proPeriod;
+    if(fi && d.freePrice !== undefined) fi.value = d.freePrice;
+    if(fpi && d.freePeriod) fpi.value = d.freePeriod;
+    if(pi && d.proPrice !== undefined) pi.value = d.proPrice;
+    if(ppi && d.proPeriod) ppi.value = d.proPeriod;
+  }catch(e){}
+}
+loadPricingConfig();
+
+window.adminSavePrices = async function(){
+  if(!isAdmin()){ showToast('❌ Admin access naha'); return; }
+  const freePrice  = parseFloat(document.getElementById('priceFreeInput')?.value||'0');
+  const freePeriod = (document.getElementById('priceFreePeriodInput')?.value||'').trim();
+  const proPrice   = parseFloat(document.getElementById('priceProInput')?.value||'2490');
+  const proPeriod  = (document.getElementById('priceProPeriodInput')?.value||'').trim();
+  try{
+    await setDoc(doc(db,'siteConfig','pricing'),{freePrice, freePeriod, proPrice, proPeriod});
+    // Update pricing page live
+    const fv=document.getElementById('priceFreeVal'); if(fv) fv.textContent=Number(freePrice).toLocaleString();
+    const fp=document.getElementById('priceFreePeriod'); if(fp&&freePeriod) fp.textContent=freePeriod;
+    const pv=document.getElementById('priceProVal'); if(pv) pv.textContent=Number(proPrice).toLocaleString();
+    const pp=document.getElementById('priceProPeriod'); if(pp&&proPeriod) pp.textContent=proPeriod;
+    showToast('✅ Prices updated!');
+  }catch(e){ showToast('❌ '+e.message); }
+};
+
+// Pricing Ads Firestore bridge
+window._paAddDoc = async function(data){
+  return addDoc(collection(db,'pricingAds'),{...data, active:true, createdAt:serverTimestamp()});
+};
+window._paDeleteDoc = async function(id){
+  return deleteDoc(doc(db,'pricingAds',id));
+};
+
+// Realtime listener for pricing ads
+onSnapshot(
+  query(collection(db,'pricingAds'), orderBy('createdAt','desc')),
+  (snap)=>{
+    const ads = snap.docs.map(d=>({id:d.id,...d.data()})).filter(d=>d.active!==false);
+    window._latestPricingAds = ads;
+    if(typeof renderPricingAds==='function') renderPricingAds(ads);
+    if(typeof loadAdminPricingAds==='function') loadAdminPricingAds();
+  },
+  ()=>{}
+);
+
+// ── ANNOUNCEMENT FIREBASE BRIDGE ─────────────────────────────
+window._annAddDoc = async function(title, message, type){
+  return addDoc(collection(db,'announcements'),{
+    title, message, type,
+    active: true,
+    createdAt: serverTimestamp()
+  });
+};
+
+window._annDeleteDoc = async function(id){
+  return deleteDoc(doc(db,'announcements',id));
+};
+
+window._annGetDocs = async function(){
+  const snap = await getDocs(query(collection(db,'announcements'), orderBy('createdAt','desc')));
+  return snap.docs.map(d=>({id:d.id,...d.data()}));
+};
+
+// ── ANNOUNCEMENT: realtime listener ─────────────────────────
+// Show latest active announcement to every visitor on every page load.
+// Only hide it for the current PAGE SESSION (not permanently) — so each
+// fresh page load / refresh shows it again until admin deletes it.
+// ── ANNOUNCEMENT STATE ───────────────────────────────────────
+// Single source of truth: window._annState shared with non-module scripts
+window._annState = { shownId: null, dismissed: false };
+
+function _annAutoClose(){
+  const ov  = document.getElementById('announcementOverlay');
+  const box = document.getElementById('announcementBox');
+  if(!ov || !box) return;
+  box.style.opacity = '0';
+  box.style.transform = 'scale(0.92) translateY(16px)';
+  setTimeout(()=>{ ov.classList.remove('ann-visible'); }, 320);
+  window._annState.shownId   = null;
+  window._annState.dismissed = false;
+}
+
+function _annDoShow(ann){
+  window._annState.shownId   = ann.id;
+  window._annState.dismissed = false;
+  setTimeout(()=>{
+    if(typeof showAnnouncementOverlay === 'function') showAnnouncementOverlay(ann);
+  }, 800);
+}
+
+// Realtime listener — fires immediately on load and on every Firestore change
+onSnapshot(
+  query(collection(db,'announcements'), orderBy('createdAt','desc')),
+  (snap) => {
+    const docs = snap.docs.map(d=>({id:d.id,...d.data()})).filter(d=>d.active!==false);
+    window._latestAnnDocs = docs;
+
+    // ① Admin panel open → refresh list
+    if(typeof loadAdminAnnouncements==='function') loadAdminAnnouncements();
+
+    // ② If overlay currently showing and that doc was deleted → auto-close
+    const shownId = window._annState.shownId;
+    if(shownId){
+      const stillThere = docs.some(d=>d.id===shownId);
+      if(!stillThere) _annAutoClose();
+      return; // already showing something, don't re-trigger
+    }
+
+    // ③ User already dismissed this page load → don't show again
+    if(window._annState.dismissed) return;
+
+    // ④ Nothing shown yet → show latest announcement
+    if(docs.length > 0) _annDoShow(docs[0]);
+  },
+  ()=>{}
+);
+
 let _activeXHR = null;
 let _uploadCancelled = false;
 
@@ -3621,8 +3758,8 @@ html{scroll-behavior:smooth;}
     <div class="pricing-grid">
       <div class="price-card">
         <div class="price-plan">Free</div>
-        <div class="price-amount" style="font-size:28px;color:var(--text-muted)">LKR 0</div>
-        <div class="price-period">Forever · No card needed</div>
+        <div class="price-amount" style="font-size:28px;color:var(--text-muted)">LKR <span id="priceFreeVal">0</span></div>
+        <div class="price-period" id="priceFreePeriod">Forever · No card needed</div>
         <ul class="price-features">
           <li>Public profile page</li><li>Up to 3 projects</li><li>250 MB storage</li>
           <li>Hire Me button</li><li>Appear in search</li>
@@ -3635,8 +3772,8 @@ html{scroll-behavior:smooth;}
       <div class="price-card featured">
         <div class="price-badge">Most Popular</div>
         <div class="price-plan">Pro</div>
-        <div class="price-amount">2,490</div>
-        <div class="price-period">LKR / month · or LKR 24,900/yr (save 2 months)</div>
+        <div class="price-amount"><span id="priceProVal">2,490</span></div>
+        <div class="price-period" id="priceProPeriod">LKR / month · or LKR 24,900/yr (save 2 months)</div>
         <ul class="price-features">
           <li>Everything in Free</li><li>Unlimited projects</li><li>5 GB storage</li>
           <li>Verified badge ✓</li><li>Full analytics</li><li>Priority in search</li>
@@ -3644,10 +3781,14 @@ html{scroll-behavior:smooth;}
           <li>✨ Animated name styles</li><li>🖼 Animated profile frame</li>
           <li>Priority support</li>
         </ul>
-        <button class="btn btn-primary" style="width:100%;justify-content:center" onclick="openModal('upgrade')">Upgrade to Pro</button>
+        <a href="https://wa.me/94723961127?text=Hi!%20I%20want%20to%20upgrade%20to%20Creativo%20Pro" target="_blank" class="btn btn-primary" style="width:100%;justify-content:center;text-decoration:none;display:flex;font-size:15px;font-weight:700;padding:14px">💬 WhatsApp Us to Upgrade Pro</a>
       </div>
     </div>
     <p style="margin-top:20px;font-size:13px;color:var(--text-muted)">Payment via bank transfer · Activated within 24hrs after WhatsApp confirmation</p>
+
+    <!-- ── CLAIM OFFER AD CARD (dynamic — filled by renderPricingPageAd) ── -->
+    <div id="pricingClaimAd" style="margin:36px auto 48px;max-width:640px;border-radius:22px;overflow:hidden;position:relative;cursor:pointer;box-shadow:0 20px 60px rgba(0,0,0,0.5);display:none" onclick="openClaimOfferWA()"></div>
+
   </div>
 </div>
 
@@ -3738,6 +3879,127 @@ html{scroll-behavior:smooth;}
           </div>
         </div>
         <div id="dashTabAdmin" class="dash-tab-content">
+
+          <!-- ── PRICING PRICE EDITOR ───────────────── -->
+          <div class="dash-card" style="margin-bottom:20px">
+            <div class="dash-card-header" style="margin-bottom:16px">
+              <span class="dash-card-title">💎 Pricing — Price Editor</span>
+              <span style="font-size:11px;color:var(--text-muted)">Pricing page ekata real-time update wena</span>
+            </div>
+            <!-- Free Plan -->
+            <div style="background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:12px">
+              <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:12px">🆓 Free Plan</div>
+              <div class="form-row">
+                <div class="form-group" style="margin:0">
+                  <label style="font-size:11px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Price (LKR)</label>
+                  <input id="priceFreeInput" class="form-input" type="number" placeholder="0" value="0">
+                </div>
+                <div class="form-group" style="margin:0">
+                  <label style="font-size:11px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Period / Sub-label</label>
+                  <input id="priceFreePeriodInput" class="form-input" placeholder="Forever · No card needed">
+                </div>
+              </div>
+            </div>
+            <!-- Pro Plan -->
+            <div style="background:rgba(255,92,0,0.06);border:1px solid rgba(255,92,0,0.25);border-radius:12px;padding:16px;margin-bottom:16px">
+              <div style="font-size:13px;font-weight:700;color:var(--orange);margin-bottom:12px">⭐ Pro Plan</div>
+              <div class="form-row">
+                <div class="form-group" style="margin:0">
+                  <label style="font-size:11px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Price (LKR)</label>
+                  <input id="priceProInput" class="form-input" type="number" placeholder="2490" value="2490">
+                </div>
+                <div class="form-group" style="margin:0">
+                  <label style="font-size:11px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Period / Sub-label</label>
+                  <input id="priceProPeriodInput" class="form-input" placeholder="LKR / month · or LKR 24,900/yr">
+                </div>
+              </div>
+            </div>
+            <button onclick="adminSavePrices()" style="width:100%;background:linear-gradient(135deg,#ff5c00,#ff8c00);color:white;border:none;border-radius:10px;padding:12px;font-size:13px;font-weight:700;cursor:pointer">💾 Save Prices</button>
+          </div>
+
+          <!-- ── PRICING ADS PANEL ───────────────────── -->
+          <div class="dash-card" style="margin-bottom:20px">
+            <div class="dash-card-header" style="margin-bottom:16px">
+              <span class="dash-card-title">🎯 Pricing Page Ads</span>
+              <span style="font-size:11px;color:var(--text-muted)">Pricing page ekata lassana animated banners</span>
+            </div>
+            <div style="background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.2);border-radius:10px;padding:11px 14px;margin-bottom:16px;font-size:12px;color:#818cf8;line-height:1.6">
+              📌 Announcement panel eke wagema — add karanakota pricing page ekata lassanata animate wela penna. Delete button ekata gewala.
+            </div>
+
+            <!-- Active ads list -->
+            <div id="adminPricingAdsList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px"></div>
+
+            <!-- New ad form -->
+            <div style="background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:16px">
+              <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:12px">✍️ New Ad</div>
+              <div style="margin-bottom:10px">
+                <label style="font-size:11px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Headline</label>
+                <input id="paTitle" class="form-input" placeholder="e.g. 🎉 50% OFF — First Month Free!" style="width:100%;box-sizing:border-box">
+              </div>
+              <div style="margin-bottom:10px">
+                <label style="font-size:11px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Description</label>
+                <textarea id="paBody" class="form-input" rows="3" placeholder="Limited time offer details…" style="width:100%;box-sizing:border-box;resize:vertical;min-height:80px"></textarea>
+              </div>
+              <div class="form-row" style="margin-bottom:14px">
+                <div class="form-group" style="margin:0">
+                  <label style="font-size:11px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Color Theme</label>
+                  <select id="paColor" class="form-input">
+                    <option value="orange">🟠 Orange</option>
+                    <option value="purple">🟣 Purple</option>
+                    <option value="green">🟢 Green</option>
+                    <option value="blue">🔵 Blue</option>
+                    <option value="gold">🟡 Gold</option>
+                    <option value="pink">🩷 Pink</option>
+                  </select>
+                </div>
+                <div class="form-group" style="margin:0">
+                  <label style="font-size:11px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Button Label (optional)</label>
+                  <input id="paCta" class="form-input" placeholder="e.g. Claim Offer">
+                </div>
+              </div>
+              <button onclick="adminPostPricingAd()" style="width:100%;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:white;border:none;border-radius:10px;padding:11px;font-size:13px;font-weight:700;cursor:pointer">🎯 Publish Ad</button>
+            </div>
+          </div>
+
+          <!-- ── ANNOUNCEMENT PANEL ───────────────────── -->
+          <div class="dash-card" style="margin-bottom:20px">
+            <div class="dash-card-header" style="margin-bottom:14px">
+              <span class="dash-card-title">📢 Site Announcement</span>
+              <span style="font-size:11px;color:var(--text-muted)">Users website load wela penna</span>
+            </div>
+            <div style="background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.25);border-radius:10px;padding:12px 14px;margin-bottom:16px;font-size:12px;color:#818cf8;line-height:1.6">
+              📌 Admin type karala send karanakota, users website ekata eddi overlay ekak widihata message eka penna. Close button ekak thiyanawa. Tika welawakin fade in wela penna.
+            </div>
+
+            <!-- Active announcements list -->
+            <div id="adminAnnouncementsList" style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px"></div>
+
+            <!-- Compose new announcement -->
+            <div style="background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:16px">
+              <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:12px">✍️ New Announcement</div>
+              <div style="margin-bottom:10px">
+                <label style="font-size:11px;color:var(--text-muted);font-weight:600;letter-spacing:.5px;text-transform:uppercase;display:block;margin-bottom:6px">Title</label>
+                <input id="annTitle" class="form-input" placeholder="e.g. Site Maintenance, New Feature, Important Notice…" style="width:100%;box-sizing:border-box">
+              </div>
+              <div style="margin-bottom:10px">
+                <label style="font-size:11px;color:var(--text-muted);font-weight:600;letter-spacing:.5px;text-transform:uppercase;display:block;margin-bottom:6px">Type</label>
+                <select id="annType" class="form-input" style="width:100%;box-sizing:border-box">
+                  <option value="info">ℹ️ Info (Blue)</option>
+                  <option value="warning">⚠️ Warning (Yellow)</option>
+                  <option value="error">🚨 Error / Outage (Red)</option>
+                  <option value="success">✅ Update / Good News (Green)</option>
+                </select>
+              </div>
+              <div style="margin-bottom:14px">
+                <label style="font-size:11px;color:var(--text-muted);font-weight:600;letter-spacing:.5px;text-transform:uppercase;display:block;margin-bottom:6px">Message</label>
+                <textarea id="annMessage" class="form-input" rows="4" placeholder="Users walata kiyanna one dey type karanna…" style="width:100%;box-sizing:border-box;resize:vertical;min-height:90px"></textarea>
+              </div>
+              <button onclick="adminPostAnnouncement()" style="background:linear-gradient(135deg,#6366f1,#8b5cf6);color:white;border:none;border-radius:10px;padding:11px 20px;font-size:13px;font-weight:700;cursor:pointer;width:100%">📢 Send Announcement</button>
+            </div>
+          </div>
+
+          <!-- ── USER MANAGEMENT ─────────────────────── -->
           <div class="dash-card">
             <div class="dash-card-header">
               <span class="dash-card-title">🛡️ Admin Panel</span>
@@ -4149,7 +4411,7 @@ html{scroll-behavior:smooth;}
     <div style="font-family:var(--font-display);font-size:28px;font-weight:800;color:var(--text)">LKR 2,490 <span style="font-size:14px;font-weight:400;color:var(--text-muted)">/month</span></div>
     <div style="font-size:12px;color:var(--text-muted);margin-top:4px">or LKR 24,900/year (save 2 months)</div>
   </div>
-  <a id="upgradeWaBtn" href="https://wa.me/94723961127?text=Hi!%20I%20want%20to%20upgrade%20to%20Creativo%20Pro" target="_blank" class="btn" style="width:100%;justify-content:center;padding:12px;background:#25D366;color:white;border:none;font-size:15px">💬 WhatsApp Us to Upgrade</a>
+  <a id="upgradeWaBtn" href="https://wa.me/94723961127?text=Hi!%20I%20want%20to%20upgrade%20to%20Creativo%20Pro" target="_blank" class="btn" style="width:100%;justify-content:center;padding:14px;background:#25D366;color:white;border:none;font-size:15px;font-weight:700;border-radius:12px;letter-spacing:.2px">💬 WhatsApp Us to Upgrade Pro</a>
   <p style="font-size:12px;color:var(--text-muted);margin-top:12px">Activated within 24 hrs after payment</p>
 </div>
 </div>
@@ -4672,7 +4934,7 @@ function switchDashTab(tab, el){
   if(map[tab]) document.getElementById(map[tab]).classList.add('active');
   if(tab==='inquiries'&&window.loadDashInquiries) window.loadDashInquiries();
   if((tab==='projects'||tab==='overview')&&window.loadDashboard) window.loadDashboard();
-  if(tab==='admin') loadAdminPanel();
+  if(tab==='admin'){ loadAdminPanel(); if(typeof loadAdminAnnouncements==='function') loadAdminAnnouncements(); }
 }
 
 function dmtSetActive(name){
@@ -5041,6 +5303,543 @@ window.submitContactForm = function(){
 };
 </script>
 
+<!-- ── ANNOUNCEMENT OVERLAY ──────────────────────────────── -->
+<div id="announcementOverlay" style="display:none;position:fixed;inset:0;z-index:99990;background:rgba(0,0,0,0.7);backdrop-filter:blur(6px);align-items:center;justify-content:center;padding:20px">
+  <div id="announcementBox" style="background:var(--surface,#1a1a1a);border:1px solid var(--border2,#333);border-radius:20px;width:100%;max-width:480px;padding:0;overflow:hidden;opacity:0;transform:scale(0.92) translateY(20px);transition:opacity .35s cubic-bezier(.34,1.2,.64,1),transform .35s cubic-bezier(.34,1.2,.64,1)">
+    <div id="annStrip" style="height:5px;width:100%;background:linear-gradient(90deg,#6366f1,#8b5cf6)"></div>
+    <div style="padding:24px 24px 20px">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div id="annIconBadge" style="width:40px;height:40px;border-radius:12px;background:rgba(99,102,241,0.15);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0">📢</div>
+          <div>
+            <div id="annOverlayTitle" style="font-family:var(--font-display,'Syne',sans-serif);font-size:17px;font-weight:800;color:var(--text,#fff);line-height:1.2"></div>
+            <div style="font-size:11px;color:var(--text-muted,#666);margin-top:3px">Creativo Team · Official Announcement</div>
+          </div>
+        </div>
+        <button onclick="closeAnnouncement()" style="background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);color:rgba(255,255,255,0.5);width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1">×</button>
+      </div>
+      <div id="annOverlayMessage" style="font-size:14px;color:var(--text-muted,#aaa);line-height:1.75;white-space:pre-wrap"></div>
+      <button onclick="closeAnnouncement()" style="margin-top:20px;width:100%;background:var(--surface2,#222);border:1px solid var(--border2,#333);color:var(--text,#fff);border-radius:10px;padding:11px;font-size:13px;font-weight:600;cursor:pointer">Got it, close</button>
+    </div>
+  </div>
+</div>
+<style>
+#announcementOverlay.ann-visible { display:flex !important; }
+</style>
+<script>
+const ANN_TYPES = {
+  info:    { strip:'linear-gradient(90deg,#3b82f6,#6366f1)', icon:'ℹ️',  bg:'rgba(59,130,246,0.12)'  },
+  warning: { strip:'linear-gradient(90deg,#f59e0b,#fbbf24)', icon:'⚠️',  bg:'rgba(245,158,11,0.12)' },
+  error:   { strip:'linear-gradient(90deg,#ef4444,#f87171)', icon:'🚨',  bg:'rgba(239,68,68,0.12)'  },
+  success: { strip:'linear-gradient(90deg,#22c55e,#4ade80)', icon:'✅',  bg:'rgba(34,197,94,0.12)'  },
+};
+
+window.adminPostAnnouncement = async function(){
+  if(typeof isAdmin==='function' && !isAdmin()){ if(typeof showToast==='function') showToast('❌ Admin access naha'); return; }
+  const title   = (document.getElementById('annTitle')?.value||'').trim();
+  const message = (document.getElementById('annMessage')?.value||'').trim();
+  const type    = document.getElementById('annType')?.value || 'info';
+  if(!title||!message){ if(typeof showToast==='function') showToast('⚠️ Title සහ Message fill karanna'); return; }
+  try{
+    await window._annAddDoc(title, message, type);
+    document.getElementById('annTitle').value = '';
+    document.getElementById('annMessage').value = '';
+    if(typeof showToast==='function') showToast('✅ Announcement sent!');
+    loadAdminAnnouncements();
+  }catch(e){ if(typeof showToast==='function') showToast('❌ '+e.message); }
+};
+
+window.adminDeleteAnnouncement = async function(id){
+  if(!confirm('Delete this announcement?')) return;
+  try{
+    await window._annDeleteDoc(id);
+    if(typeof showToast==='function') showToast('🗑 Announcement deleted');
+    loadAdminAnnouncements();
+  }catch(e){ if(typeof showToast==='function') showToast('❌ '+e.message); }
+};
+
+function loadAdminAnnouncements(){
+  const el = document.getElementById('adminAnnouncementsList');
+  if(!el) return;
+  const snaps = window._latestAnnDocs;
+  if(snaps === undefined){
+    el.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:8px 0">⏳ Loading...</div>';
+    return;
+  }
+  if(!snaps || snaps.length === 0){
+    el.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:8px 0">No active announcements.</div>';
+    return;
+  }
+  el.innerHTML = '';
+  snaps.forEach(function(a){
+    var t = ANN_TYPES[a.type] || ANN_TYPES.info;
+    var rowEl = document.createElement('div');
+    rowEl.style.cssText = 'background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;display:flex;align-items:flex-start;gap:12px';
+    rowEl.innerHTML = '<span style="font-size:20px;flex-shrink:0">' + t.icon + '</span>'
+      + '<div style="flex:1;min-width:0">'
+        + '<div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:3px">' + a.title + '</div>'
+        + '<div style="font-size:12px;color:var(--text-muted);line-height:1.5;white-space:pre-wrap;overflow:hidden;max-height:56px">' + a.message + '</div>'
+      + '</div>';
+    var btn = document.createElement('button');
+    btn.textContent = '🗑';
+    btn.title = 'Delete';
+    btn.style.cssText = 'background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.25);color:#f87171;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:13px;flex-shrink:0';
+    btn.onclick = (function(id){ return function(){ adminDeleteAnnouncement(id); }; })(a.id);
+    rowEl.appendChild(btn);
+    el.appendChild(rowEl);
+  });
+}
+
+function showAnnouncementOverlay(ann){
+  const ov=document.getElementById('announcementOverlay');
+  const box=document.getElementById('announcementBox');
+  const strip=document.getElementById('annStrip');
+  const iconBadge=document.getElementById('annIconBadge');
+  const titleEl=document.getElementById('annOverlayTitle');
+  const msgEl=document.getElementById('annOverlayMessage');
+  if(!ov||!box||!ann) return;
+  const t=ANN_TYPES[ann.type]||ANN_TYPES.info;
+  strip.style.background=t.strip;
+  iconBadge.textContent=t.icon;
+  iconBadge.style.background=t.bg;
+  titleEl.textContent=ann.title;
+  msgEl.textContent=ann.message;
+  box.style.opacity='0';
+  box.style.transform='scale(0.92) translateY(20px)';
+  ov.classList.add('ann-visible');
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    box.style.opacity='1';
+    box.style.transform='scale(1) translateY(0)';
+  }));
+}
+
+window.closeAnnouncement = function(){
+  const ov=document.getElementById('announcementOverlay');
+  const box=document.getElementById('announcementBox');
+  if(!ov||!box) return;
+  box.style.opacity='0';
+  box.style.transform='scale(0.92) translateY(16px)';
+  setTimeout(()=>{ ov.classList.remove('ann-visible'); },320);
+  // User closed manually — mark dismissed so it won't re-appear this page load
+  if(window._annState){ window._annState.dismissed=true; window._annState.shownId=null; }
+};
+
+document.getElementById('announcementOverlay').addEventListener('click',function(e){
+  if(e.target===this) window.closeAnnouncement();
+});
+</script>
+
+<!-- ── PRICING ADS JS ─────────────────────────────────────── -->
+<script>
+const PA_COLORS = {
+  orange:{ grad:'linear-gradient(135deg,#ff5c00,#ff8c00)', strip:'linear-gradient(90deg,#ff5c00,#ff8c00)', glow:'rgba(255,92,0,0.28)',   border:'rgba(255,92,0,0.45)',   bg:'rgba(255,92,0,0.1)',   icon:'🔥' },
+  purple:{ grad:'linear-gradient(135deg,#6366f1,#8b5cf6)', strip:'linear-gradient(90deg,#6366f1,#8b5cf6)', glow:'rgba(99,102,241,0.28)', border:'rgba(99,102,241,0.45)', bg:'rgba(99,102,241,0.1)', icon:'✨' },
+  green: { grad:'linear-gradient(135deg,#22c55e,#16a34a)', strip:'linear-gradient(90deg,#22c55e,#4ade80)', glow:'rgba(34,197,94,0.28)',  border:'rgba(34,197,94,0.45)',  bg:'rgba(34,197,94,0.1)',  icon:'🎉' },
+  blue:  { grad:'linear-gradient(135deg,#3b82f6,#1d4ed8)', strip:'linear-gradient(90deg,#3b82f6,#60a5fa)', glow:'rgba(59,130,246,0.28)', border:'rgba(59,130,246,0.45)', bg:'rgba(59,130,246,0.1)', icon:'⚡' },
+  gold:  { grad:'linear-gradient(135deg,#f59e0b,#b45309)', strip:'linear-gradient(90deg,#f59e0b,#fbbf24)', glow:'rgba(245,158,11,0.28)', border:'rgba(245,158,11,0.45)', bg:'rgba(245,158,11,0.1)', icon:'🏆' },
+  pink:  { grad:'linear-gradient(135deg,#ec4899,#be185d)', strip:'linear-gradient(90deg,#ec4899,#f472b6)', glow:'rgba(236,72,153,0.28)', border:'rgba(236,72,153,0.45)', bg:'rgba(236,72,153,0.1)', icon:'💝' },
+};
+
+// ── Ad Overlay State ─────────────────────────────────────────
+window._paState = { shownId: null, dismissed: false };
+
+// ── Show ad as animated overlay (announcement style) ─────────
+function showPricingAdOverlay(ad){
+  const c = PA_COLORS[ad.color||'orange'] || PA_COLORS.orange;
+  const ov  = document.getElementById('pricingAdOverlay');
+  const box = document.getElementById('pricingAdBox');
+  if(!ov || !box || !ad) return;
+
+  // Populate
+  document.getElementById('paStrip').style.background   = c.strip;
+  document.getElementById('paIconBadge').textContent     = c.icon;
+  document.getElementById('paIconBadge').style.background= c.bg;
+  document.getElementById('paIconBadge').style.boxShadow = '0 0 18px '+c.glow;
+  document.getElementById('paOverlayTitle').textContent  = ad.title||'';
+  document.getElementById('paOverlayBody').textContent   = ad.body||'';
+
+  const ctaBtn = document.getElementById('paOverlayCta');
+  if(ad.cta){
+    ctaBtn.textContent = ad.cta;
+    ctaBtn.style.background = c.grad;
+    ctaBtn.style.boxShadow  = '0 4px 18px '+c.glow;
+    ctaBtn.style.display    = 'block';
+  } else {
+    ctaBtn.style.display = 'none';
+  }
+
+  // Animate in
+  box.style.opacity   = '0';
+  box.style.transform = 'scale(0.88) translateY(28px)';
+  ov.classList.add('pa-visible');
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    box.style.opacity   = '1';
+    box.style.transform = 'scale(1) translateY(0)';
+  }));
+
+  window._paState.shownId   = ad.id;
+}
+
+// ── Ad queue state ───────────────────────────────────────────
+window._paState = { shownId: null, dismissed: false, queue: [], queueIdx: 0 };
+
+// ── Show next ad in queue ─────────────────────────────────────
+function showNextPricingAd(){
+  const q = window._paState.queue;
+  const idx = window._paState.queueIdx;
+  if(!q || idx >= q.length) return; // all ads shown
+  showPricingAdOverlay(q[idx]);
+}
+
+// ── Close ad overlay — then auto-show next ad if any ─────────
+window.closePricingAd = function(){
+  const ov  = document.getElementById('pricingAdOverlay');
+  const box = document.getElementById('pricingAdBox');
+  if(!ov || !box) return;
+  box.style.opacity   = '0';
+  box.style.transform = 'scale(0.88) translateY(20px)';
+  setTimeout(()=>{
+    ov.classList.remove('pa-visible');
+    window._paState.shownId = null;
+    // advance queue and show next ad after short pause
+    window._paState.queueIdx++;
+    const q = window._paState.queue;
+    if(window._paState.queueIdx < q.length){
+      setTimeout(()=> showNextPricingAd(), 700);
+    }
+  }, 330);
+};
+
+// ── Realtime: show all ads in queue, one after another ───────
+window.renderPricingAds = function(ads){
+  const shownId = window._paState.shownId;
+
+  // If currently showing an ad that got deleted → auto close then continue
+  if(shownId){
+    const stillThere = ads.some(a => a.id === shownId);
+    if(!stillThere){
+      window.closePricingAd();
+    }
+    // update queue with fresh list (keep position)
+    window._paState.queue = ads;
+    renderPricingPageAd(ads.length > 0 ? ads[0] : null);
+    return;
+  }
+
+  // Build fresh queue and reset pointer only on first load
+  if(window._paState.queue.length === 0){
+    window._paState.queue    = ads;
+    window._paState.queueIdx = 0;
+    if(ads && ads.length > 0){
+      setTimeout(()=> showNextPricingAd(), 900);
+    }
+  } else {
+    // Firestore update while queue already running — refresh queue but keep pointer
+    window._paState.queue = ads;
+  }
+
+  // ── Update pricing page inline ad card ──────────────────
+  renderPricingPageAd(ads && ads.length > 0 ? ads[0] : null);
+};
+
+// ── Render the inline ad card on the pricing page ────────────
+function renderPricingPageAd(ad){
+  const card = document.getElementById('pricingClaimAd');
+  if(!card) return;
+
+  if(!ad){
+    card.style.display = 'none';
+    return;
+  }
+
+  card.style.display = 'block';
+  const c = PA_COLORS[ad.color||'orange'] || PA_COLORS.orange;
+
+  // Color-adaptive background based on ad color
+  const bgMap = {
+    orange: 'linear-gradient(135deg,#1e0e00 0%,#2a1400 35%,#150900 65%,#1e0e00 100%)',
+    purple: 'linear-gradient(135deg,#0e0b1e 0%,#15112a 35%,#090714 65%,#0e0b1e 100%)',
+    green:  'linear-gradient(135deg,#0a2016 0%,#0f2d1c 35%,#071810 65%,#0a2016 100%)',
+    blue:   'linear-gradient(135deg,#060f1e 0%,#0b1829 35%,#040b14 65%,#060f1e 100%)',
+    gold:   'linear-gradient(135deg,#1a1000 0%,#261800 35%,#110c00 65%,#1a1000 100%)',
+    pink:   'linear-gradient(135deg,#1e0612 0%,#2a0a1a 35%,#14040e 65%,#1e0612 100%)',
+  };
+  const bg = bgMap[ad.color||'orange'] || bgMap.orange;
+
+  // CTA label
+  const ctaLabel = (ad.cta && ad.cta.trim()) ? ad.cta.trim() : 'Claim Offer';
+
+  card.innerHTML = `
+    <div style="position:absolute;inset:0;border-radius:22px;pointer-events:none;z-index:2;border:1.5px solid ${c.border}"></div>
+    <div style="background:${bg};padding:32px 32px 28px;position:relative;overflow:hidden">
+      <div style="position:absolute;top:-40px;right:-40px;width:180px;height:180px;border-radius:50%;background:radial-gradient(circle,${c.glow} 0%,transparent 70%);pointer-events:none"></div>
+      <div style="position:absolute;bottom:-30px;left:-20px;width:130px;height:130px;border-radius:50%;background:radial-gradient(circle,${c.glow.replace('0.28','0.14')} 0%,transparent 70%);pointer-events:none"></div>
+
+      <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;position:relative;z-index:1">
+        <!-- Icon -->
+        <div style="width:68px;height:68px;border-radius:20px;background:${c.bg};border:1.5px solid ${c.border};display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:32px;box-shadow:0 6px 24px ${c.glow}">
+          ${c.icon}
+        </div>
+
+        <!-- Text -->
+        <div style="flex:1;min-width:200px;text-align:left">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+            <span style="font-size:11px;font-weight:700;letter-spacing:1.1px;text-transform:uppercase;color:${c.border}">🎉 Special Offer</span>
+          </div>
+          <div style="font-family:var(--font-display,'Syne',sans-serif);font-size:21px;font-weight:900;color:#fff;line-height:1.2;margin-bottom:7px">${ad.title||'Special Offer'}</div>
+          <div style="font-size:13px;color:rgba(255,255,255,0.45);line-height:1.6">${ad.body||''}</div>
+        </div>
+
+        <!-- CTA -->
+        <a href="#" onclick="event.preventDefault();openClaimOfferWA()"
+          style="display:inline-flex;align-items:center;gap:8px;
+            background:${c.grad};
+            color:#fff;border:none;border-radius:13px;padding:13px 22px;
+            font-size:14px;font-weight:800;cursor:pointer;text-decoration:none;
+            font-family:var(--font-display,'Syne',sans-serif);white-space:nowrap;flex-shrink:0;
+            box-shadow:0 6px 24px ${c.glow};
+            transition:transform .18s,filter .18s"
+          onmouseover="this.style.filter='brightness(1.12)';this.style.transform='scale(1.04)'"
+          onmouseout="this.style.filter='';this.style.transform=''">
+          ${ctaLabel}
+        </a>
+      </div>
+
+      <!-- Bottom pills -->
+      <div style="display:flex;gap:10px;margin-top:20px;flex-wrap:wrap;position:relative;z-index:1">
+        <div style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:100px;padding:5px 12px;font-size:11px;color:rgba(255,255,255,0.5);font-weight:600">✅ WhatsApp හරහා</div>
+        <div style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:100px;padding:5px 12px;font-size:11px;color:rgba(255,255,255,0.5);font-weight:600">⚡ 24hrs activate</div>
+        <div style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:100px;padding:5px 12px;font-size:11px;color:rgba(255,255,255,0.5);font-weight:600">🔒 Bank Transfer</div>
+      </div>
+    </div>
+  `;
+}
+
+// Initial render attempt (in case ads already loaded before this script ran)
+if(window._latestPricingAds !== undefined){
+  renderPricingPageAd(window._latestPricingAds.length > 0 ? window._latestPricingAds[0] : null);
+}
+
+// ── Admin: list ads in panel ─────────────────────────────────
+window.loadAdminPricingAds = function(){
+  const el = document.getElementById('adminPricingAdsList');
+  if(!el) return;
+  const ads = window._latestPricingAds;
+  if(ads === undefined){
+    el.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:8px 0">⏳ Loading...</div>';
+    return;
+  }
+  if(!ads || ads.length === 0){
+    el.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:8px 0">No active ads.</div>';
+    return;
+  }
+  el.innerHTML = '';
+  ads.forEach(function(ad){
+    const c = PA_COLORS[ad.color||'orange'] || PA_COLORS.orange;
+    const row = document.createElement('div');
+    row.style.cssText = 'background:var(--surface2);border:1px solid '+c.border+';border-radius:10px;padding:12px 14px;display:flex;align-items:flex-start;gap:12px';
+    row.innerHTML = '<span style="font-size:22px;flex-shrink:0">'+c.icon+'</span>'
+      +'<div style="flex:1;min-width:0">'
+        +'<div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:2px">'+ad.title+'</div>'
+        +'<div style="font-size:12px;color:var(--text-muted);line-height:1.5;overflow:hidden;max-height:52px">'+ad.body+'</div>'
+      +'</div>';
+    const delBtn = document.createElement('button');
+    delBtn.textContent = '🗑';
+    delBtn.title = 'Delete';
+    delBtn.style.cssText = 'background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.25);color:#f87171;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:13px;flex-shrink:0';
+    delBtn.onclick = (function(id){ return function(){
+      if(!confirm('Delete this ad?')) return;
+      window._paDeleteDoc(id)
+        .then(()=>{ if(typeof showToast==='function') showToast('🗑 Ad deleted'); })
+        .catch(e=>{ if(typeof showToast==='function') showToast('❌ '+e.message); });
+    }; })(ad.id);
+    row.appendChild(delBtn);
+    el.appendChild(row);
+  });
+};
+
+window.adminPostPricingAd = async function(){
+  if(typeof isAdmin==='function' && !isAdmin()){ if(typeof showToast==='function') showToast('❌ Admin access naha'); return; }
+  const title = (document.getElementById('paTitle')?.value||'').trim();
+  const body  = (document.getElementById('paBody')?.value||'').trim();
+  const color = document.getElementById('paColor')?.value || 'orange';
+  const cta   = (document.getElementById('paCta')?.value||'').trim();
+  if(!title || !body){ if(typeof showToast==='function') showToast('⚠️ Headline සහ description fill karanna'); return; }
+  try{
+    await window._paAddDoc({title, body, color, cta});
+    document.getElementById('paTitle').value = '';
+    document.getElementById('paBody').value  = '';
+    document.getElementById('paCta').value   = '';
+    if(typeof showToast==='function') showToast('✅ Ad published!');
+  }catch(e){ if(typeof showToast==='function') showToast('❌ '+e.message); }
+};
+
+// Click backdrop to close
+document.getElementById('pricingAdOverlay').addEventListener('click', function(e){
+  if(e.target === this) window.closePricingAd();
+});
+</script>
+
+<style>
+#pricingAdOverlay.pa-visible { display:flex !important; }
+#pricingAdBox {
+  transition: opacity .34s cubic-bezier(.34,1.2,.64,1), transform .34s cubic-bezier(.34,1.2,.64,1);
+}
+@keyframes paIconPulse {
+  0%,100% { transform:scale(1);   }
+  50%     { transform:scale(1.12); }
+}
+</style>
+
+<!-- ── CLAIM OFFER WHATSAPP AD PANEL ──────────────────── -->
+<style>
+#claimOfferPanel { display:none; position:fixed; inset:0; z-index:99990;
+  background:rgba(0,0,0,0.82); backdrop-filter:blur(10px);
+  -webkit-backdrop-filter:blur(10px);
+  align-items:center; justify-content:center; padding:20px; }
+#claimOfferPanel.cop-visible { display:flex !important; }
+
+#claimOfferBox {
+  background:var(--surface,#181818);
+  border-radius:24px;
+  width:100%; max-width:420px;
+  overflow:hidden; position:relative;
+  box-shadow: 0 32px 80px rgba(0,0,0,0.7), 0 0 0 1px rgba(37,211,102,0.18);
+  opacity:0; transform:scale(0.88) translateY(24px);
+  transition: opacity .38s cubic-bezier(.34,1.1,.64,1),
+              transform .38s cubic-bezier(.34,1.1,.64,1);
+}
+#claimOfferPanel.cop-visible #claimOfferBox {
+  opacity:1; transform:scale(1) translateY(0);
+}
+
+/* Animated WA glow border */
+@keyframes copGlow {
+  0%,100% { box-shadow: 0 32px 80px rgba(0,0,0,0.7), 0 0 0 1.5px rgba(37,211,102,0.35), 0 0 32px rgba(37,211,102,0.08); }
+  50%      { box-shadow: 0 32px 80px rgba(0,0,0,0.7), 0 0 0 1.5px rgba(37,211,102,0.7),  0 0 48px rgba(37,211,102,0.18); }
+}
+#claimOfferPanel.cop-visible #claimOfferBox {
+  animation: copGlow 2.8s ease-in-out infinite;
+}
+
+/* WA button pulse */
+@keyframes copWaPulse {
+  0%,100% { box-shadow: 0 6px 24px rgba(37,211,102,0.4); }
+  50%      { box-shadow: 0 8px 36px rgba(37,211,102,0.7); }
+}
+#copWaBtn { animation: copWaPulse 2s ease-in-out infinite; }
+
+/* Badge shimmer */
+@keyframes copShimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+.cop-offer-badge {
+  display:inline-block;
+  background: linear-gradient(100deg, #25D366 0%, #1ebe5d 40%, #7fffc4 55%, #1ebe5d 70%, #25D366 100%);
+  background-size: 200% auto;
+  animation: copShimmer 2.4s linear infinite;
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+  background-clip:text;
+  font-weight:900; font-size:13px; letter-spacing:.4px;
+}
+</style>
+
+<div id="claimOfferPanel" onclick="if(event.target===this)closeClaimOfferPanel()">
+  <div id="claimOfferBox">
+
+    <!-- Hero banner strip — dark green gradient -->
+    <div style="background:linear-gradient(135deg,#0d2b1a 0%,#0f3320 40%,#082010 100%);padding:28px 26px 24px;position:relative;overflow:hidden">
+      <!-- decorative circles -->
+      <div style="position:absolute;top:-30px;right:-30px;width:130px;height:130px;border-radius:50%;background:rgba(37,211,102,0.07);pointer-events:none"></div>
+      <div style="position:absolute;bottom:-20px;left:-20px;width:90px;height:90px;border-radius:50%;background:rgba(37,211,102,0.05);pointer-events:none"></div>
+
+      <!-- Close X -->
+      <button onclick="closeClaimOfferPanel()" style="position:absolute;top:14px;right:14px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);color:rgba(255,255,255,0.5);width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center;transition:background .15s;z-index:2" onmouseover="this.style.background='rgba(255,255,255,0.16)'" onmouseout="this.style.background='rgba(255,255,255,0.08)'">×</button>
+
+      <!-- WA logo badge -->
+      <div style="width:62px;height:62px;border-radius:18px;background:rgba(37,211,102,0.15);border:1.5px solid rgba(37,211,102,0.35);display:flex;align-items:center;justify-content:center;margin-bottom:16px;box-shadow:0 4px 18px rgba(37,211,102,0.2)">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="#25D366"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 0C5.373 0 0 5.373 0 12c0 2.123.554 4.118 1.525 5.845L0 24l6.335-1.503A11.954 11.954 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 21.818a9.815 9.815 0 01-5.003-1.368l-.36-.214-3.761.893.952-3.671-.234-.374A9.818 9.818 0 012.182 12C2.182 6.57 6.57 2.182 12 2.182S21.818 6.57 21.818 12 17.43 21.818 12 21.818z"/></svg>
+      </div>
+
+      <!-- Tag line -->
+      <div style="font-size:11px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:rgba(37,211,102,0.7);margin-bottom:6px">🎉 Limited Time Offer</div>
+      <div style="font-family:var(--font-display,'Syne',sans-serif);font-size:24px;font-weight:900;color:#fff;line-height:1.15;margin-bottom:6px">Claim Your<br><span class="cop-offer-badge">Pro Plan Offer</span></div>
+      <div style="font-size:13px;color:rgba(255,255,255,0.45);margin-top:4px">Creativo · Special offer · WhatsApp හරහා activate කරගන්න</div>
+    </div>
+
+    <!-- Body -->
+    <div style="padding:22px 24px 26px">
+
+      <!-- 3 benefit pills -->
+      <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:22px">
+        <div style="display:flex;align-items:center;gap:12px;background:var(--surface2,#212121);border:1px solid var(--border,#282828);border-radius:12px;padding:11px 14px">
+          <div style="width:34px;height:34px;border-radius:10px;background:rgba(37,211,102,0.1);display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0">✅</div>
+          <div>
+            <div style="font-size:13px;font-weight:700;color:var(--text,#fff)">WhatsApp message එකක් යවන්න</div>
+            <div style="font-size:11px;color:var(--text-muted,#666);margin-top:1px">ඔබේ special offer claim කරගන්නෙ ඒ විදිහට</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;background:var(--surface2,#212121);border:1px solid var(--border,#282828);border-radius:12px;padding:11px 14px">
+          <div style="width:34px;height:34px;border-radius:10px;background:rgba(255,200,0,0.1);display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0">⚡</div>
+          <div>
+            <div style="font-size:13px;font-weight:700;color:var(--text,#fff)">24 hrs ඇතුලත activate</div>
+            <div style="font-size:11px;color:var(--text-muted,#666);margin-top:1px">Payment confirm වූ ගමන් Pro activate කරලා දෙනවා</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;background:var(--surface2,#212121);border:1px solid var(--border,#282828);border-radius:12px;padding:11px 14px">
+          <div style="width:34px;height:34px;border-radius:10px;background:rgba(100,100,255,0.1);display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0">🔒</div>
+          <div>
+            <div style="font-size:13px;font-weight:700;color:var(--text,#fff)">Bank Transfer · Safe & Secure</div>
+            <div style="font-size:11px;color:var(--text-muted,#666);margin-top:1px">No card needed · Payment via bank transfer</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- WhatsApp CTA -->
+      <a id="copWaBtn"
+        href="https://wa.me/94723961127?text=Hi!%20I%20want%20to%20claim%20the%20special%20offer%20for%20Creativo%20Pro"
+        target="_blank"
+        onclick="closeClaimOfferPanel()"
+        style="display:flex;align-items:center;justify-content:center;gap:10px;width:100%;
+          background:linear-gradient(135deg,#25D366 0%,#1aab52 100%);
+          color:#fff;border:none;border-radius:14px;padding:16px 20px;
+          font-size:15px;font-weight:800;cursor:pointer;text-decoration:none;
+          font-family:var(--font-display,'Syne',sans-serif);letter-spacing:.3px;
+          transition:transform .18s,filter .18s;"
+        onmouseover="this.style.filter='brightness(1.1)';this.style.transform='scale(1.02)'"
+        onmouseout="this.style.filter='';this.style.transform=''">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="white"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 0C5.373 0 0 5.373 0 12c0 2.123.554 4.118 1.525 5.845L0 24l6.335-1.503A11.954 11.954 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 21.818a9.815 9.815 0 01-5.003-1.368l-.36-.214-3.761.893.952-3.671-.234-.374A9.818 9.818 0 012.182 12C2.182 6.57 6.57 2.182 12 2.182S21.818 6.57 21.818 12 17.43 21.818 12 21.818z"/></svg>
+        WhatsApp Us to Claim Offer
+      </a>
+
+      <button onclick="closeClaimOfferPanel()"
+        style="width:100%;background:transparent;border:1px solid var(--border2,#2e2e2e);color:var(--text-muted,#666);border-radius:11px;padding:11px;font-size:13px;font-weight:600;cursor:pointer;margin-top:10px;transition:background .15s,border-color .15s"
+        onmouseover="this.style.background='var(--surface2,#1f1f1f)';this.style.borderColor='#3a3a3a'"
+        onmouseout="this.style.background='transparent';this.style.borderColor='var(--border2,#2e2e2e)'">
+        Maybe Later
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+window.openClaimOfferWA = function(){
+  const panel = document.getElementById('claimOfferPanel');
+  if(!panel) return;
+  panel.style.display = 'flex';
+  requestAnimationFrame(()=>{
+    requestAnimationFrame(()=>{ panel.classList.add('cop-visible'); });
+  });
+};
+window.closeClaimOfferPanel = function(){
+  const panel = document.getElementById('claimOfferPanel');
+  if(!panel) return;
+  panel.classList.remove('cop-visible');
+  setTimeout(()=>{ panel.style.display = 'none'; }, 400);
+};
+</script>
+
 <!-- ── JOB AD BANNER ─────────────────────────────────────── -->
 <div id="jobAdBanner" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:9000;
   background:linear-gradient(135deg,#1a1a1a 0%,#1e1e1e 100%);
@@ -5093,6 +5892,38 @@ window.submitContactForm = function(){
   #jobAdBanner { padding-bottom: env(safe-area-inset-bottom, 0); }
 }
 </style>
+
+<!-- ── PRICING AD OVERLAY ─────────────────────────────────── -->
+<div id="pricingAdOverlay" style="display:none;position:fixed;inset:0;z-index:99980;background:rgba(0,0,0,0.72);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);align-items:center;justify-content:center;padding:20px">
+  <div id="pricingAdBox" style="background:var(--surface,#1a1a1a);border:1px solid var(--border2,#2a2a2a);border-radius:22px;width:100%;max-width:500px;overflow:hidden;position:relative">
+
+    <!-- Gradient top strip -->
+    <div id="paStrip" style="height:5px;width:100%"></div>
+
+    <!-- Close X -->
+    <button onclick="closePricingAd()" style="position:absolute;top:14px;right:14px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);color:rgba(255,255,255,0.5);width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center;line-height:1;transition:background .15s;z-index:2" onmouseover="this.style.background='rgba(255,255,255,0.14)'" onmouseout="this.style.background='rgba(255,255,255,0.07)'">×</button>
+
+    <div style="padding:28px 26px 24px">
+      <!-- Icon + header -->
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:18px">
+        <div id="paIconBadge" style="width:52px;height:52px;border-radius:15px;display:flex;align-items:center;justify-content:center;font-size:26px;flex-shrink:0;animation:paIconPulse 2.4s ease-in-out infinite"></div>
+        <div>
+          <div id="paOverlayTitle" style="font-family:var(--font-display,'Syne',sans-serif);font-size:18px;font-weight:800;color:var(--text,#fff);line-height:1.25"></div>
+          <div style="font-size:11px;color:var(--text-muted,#666);margin-top:3px;font-weight:500;letter-spacing:.3px">Creativo · Special Offer</div>
+        </div>
+      </div>
+
+      <!-- Body text -->
+      <div id="paOverlayBody" style="font-size:14px;color:var(--text-muted,#aaa);line-height:1.75;margin-bottom:22px;white-space:pre-wrap"></div>
+
+      <!-- CTA + close row -->
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button id="paOverlayCta" onclick="openClaimOfferWA();closePricingAd()" style="flex:1;min-width:140px;color:#fff;border:none;border-radius:11px;padding:13px 20px;font-size:14px;font-weight:700;cursor:pointer;transition:transform .18s,box-shadow .18s;font-family:var(--font-display,'Syne',sans-serif)" onmouseover="this.style.transform='scale(1.03)'" onmouseout="this.style.transform=''">Claim Offer</button>
+        <button onclick="closePricingAd()" style="background:var(--surface2,#222);border:1px solid var(--border2,#333);color:var(--text-muted,#888);border-radius:11px;padding:13px 18px;font-size:13px;font-weight:600;cursor:pointer;transition:background .15s;white-space:nowrap" onmouseover="this.style.background='var(--surface3,#2a2a2a)'" onmouseout="this.style.background='var(--surface2,#222)'">Maybe later</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 </body>
 </html>
