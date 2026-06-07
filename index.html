@@ -132,6 +132,7 @@ function showBannedScreen(reason){
 // ── ADMIN BAN / UNBAN ─────────────────────────────────────────
 window.adminBanUser = async function(uid, userName){
   if(!isAdmin()){ showToast('❌ Admin access naha'); return; }
+  if(ADMIN_UIDS.includes(uid)){ showToast('😂 එහෙමද ආශා!'); return; }
   const reasons = {
     sexual: '🔞 Sexual / Inappropriate Content',
     inappropriate: '⚠️ Offensive / Harmful Content',
@@ -176,6 +177,12 @@ window.adminBanUser = async function(uid, userName){
 };
 
 window.confirmBanUser = async function(uid, userName, deleteContent){
+  // ── Protect CEO / hardcoded admins from being banned ─────
+  if(ADMIN_UIDS.includes(uid)){
+    showToast('😂 එහෙමද ආශා!');
+    document.getElementById('_banOverlay').style.display='none';
+    return;
+  }
   const reasonEl = document.querySelector('input[name="banReason"]:checked');
   const reason = reasonEl ? reasonEl.value : 'other';
   document.getElementById('_banOverlay').style.display='none';
