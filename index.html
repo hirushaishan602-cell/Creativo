@@ -10,7 +10,7 @@
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { getFirestore, collection, addDoc, getDocs, getDoc, doc, updateDoc, deleteDoc, increment, query, orderBy, where, serverTimestamp, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, addDoc, getDocs, getDoc, doc, updateDoc, deleteDoc, increment, query, orderBy, where, serverTimestamp, setDoc, onSnapshot, Timestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDS4WI7JSlwF9QZbX3ixzSaD-u8iXuI5wM",
@@ -47,12 +47,185 @@ async function checkAdminStatus(uid){
 function isAdmin(){ return _isAdminCached; }
 
 let _deepLinkHandled = false;
+// ── Test: set proExpiresAt to 2 minutes ago ──────────────────
+window.adminTestProExpiry = async function(uid){
+  if(!isAdmin()){ showToast('❌ Admin access required'); return; }
+  if(!confirm('Set this user\'s Pro expiry to 2 minutes ago?\n\nThey will be auto-deactivated on their next login/refresh — for testing only.')) return;
+  try{
+    const pastDate = new Date(Date.now() - 2 * 60 * 1000); // 2 mins ago
+    await updateDoc(doc(db,'users',uid),{
+      proExpiresAt: Timestamp.fromDate(pastDate)
+    });
+    showToast('⚡ Expiry set to 2 mins ago — ask the user to logout & login to trigger auto-deactivation');
+  }catch(e){ showToast('❌ '+e.message); }
+};
+async function checkProExpiry(user, userData){
+  if(!userData.isPro) return; // already free, nothing to do
+  const exp = userData.proExpiresAt; // Firestore Timestamp or null
+  if(!exp) return; // no expiry set (old data) — leave as is
+
+  const expDate = exp.toDate ? exp.toDate() : new Date(exp);
+  if(expDate > new Date()) return; // still valid
+
+  // ── Expired: deactivate ───────────────────────────────────
+  try{
+    await updateDoc(doc(db,'users',user.uid),{
+      isPro: false,
+      proExpiresAt: null,
+      proActivatedAt: null
+    });
+    // Update all user's projects
+    const pSnap = await getDocs(query(collection(db,'projects'),where('authorId','==',user.uid)));
+    await Promise.all(pSnap.docs.map(d=>updateDoc(d.ref,{authorIsPro:false})));
+
+    // Send expired notification
+    const firstName = userData.firstName || 'there';
+    await addDoc(collection(db,'notifications'),{
+      userId: user.uid,
+      type: 'pro_expired',
+      title: '⚠️ Pro Plan Expired',
+      message: `Hi ${firstName}, your Creativo Pro plan has expired. You've been moved to the Free plan. To continue enjoying Pro features, please renew via WhatsApp.`,
+      read: false,
+      createdAt: serverTimestamp()
+    });
+
+    // Update local CUD
+    if(window.CUD){ window.CUD.isPro = false; window.CUD.proExpiresAt = null; }
+
+    console.log('[Creativo] Pro plan auto-expired for', user.uid);
+  }catch(e){ console.warn('[Creativo] Pro expiry check error:', e.message); }
+}
+
+// ── BAN SCREEN ────────────────────────────────────────────────
+function showBannedScreen(reason){
+  // Close any open modals so auth modal can't be re-opened
+  document.querySelectorAll('.modal.open').forEach(m=>m.classList.remove('open'));
+
+  let ov = document.getElementById('_bannedScreen');
+  if(!ov){
+    ov = document.createElement('div');
+    ov.id = '_bannedScreen';
+    document.body.appendChild(ov);
+  }
+  const reasonMap = {
+    sexual: 'Your account has been banned for posting sexual or inappropriate content.',
+    inappropriate: 'Your account has been banned for posting offensive or harmful content.',
+    spam: 'Your account has been banned for spam or fake content.',
+    harassment: 'Your account has been banned for harassment or bullying.',
+    other: 'Your account has been banned for violating our platform policies.'
+  };
+  const msg = reasonMap[reason] || reasonMap.other;
+  ov.style.cssText = 'position:fixed;inset:0;z-index:999999;background:#0d0d0d;display:flex;align-items:center;justify-content:center;padding:24px;font-family:var(--font-body,"DM Sans",sans-serif)';
+  ov.innerHTML = `<div style="max-width:420px;width:100%;text-align:center">
+    <div style="font-size:64px;margin-bottom:20px;animation:pulse 2s infinite">🚫</div>
+    <div style="font-family:var(--font-display,'Syne',sans-serif);font-size:24px;font-weight:800;color:#f87171;margin-bottom:14px">Account Banned</div>
+    <div style="font-size:14px;color:rgba(255,255,255,0.6);line-height:1.7;margin-bottom:28px;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);border-radius:12px;padding:16px 20px">${msg}</div>
+    <div style="font-size:12px;color:rgba(255,255,255,0.3)">If you believe this is a mistake, please contact the platform team.</div>
+  </div>`;
+
+  // Block ALL clicks that could open auth modal or navigate away
+  ov.addEventListener('click', e => e.stopPropagation());
+  // Intercept any openModal calls to prevent auth modal re-opening
+  window._bannedActive = true;
+}
+
+// ── ADMIN BAN / UNBAN ─────────────────────────────────────────
+window.adminBanUser = async function(uid, userName){
+  if(!isAdmin()){ showToast('❌ Admin access naha'); return; }
+  const reasons = {
+    sexual: '🔞 Sexual / Inappropriate Content',
+    inappropriate: '⚠️ Offensive / Harmful Content',
+    spam: '🗑 Spam / Fake Content',
+    harassment: '😡 Harassment / Bullying',
+    other: '🚫 Other Policy Violation'
+  };
+  // Build reason picker overlay
+  let ov = document.getElementById('_banOverlay');
+  if(!ov){ ov=document.createElement('div'); ov.id='_banOverlay'; document.body.appendChild(ov); }
+  ov.style.cssText='position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.8);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:20px';
+  ov.innerHTML=`<div style="background:#1a1a1a;border:1px solid rgba(239,68,68,0.3);border-radius:20px;width:100%;max-width:420px;padding:26px;font-family:var(--font-body,'DM Sans',sans-serif)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <div style="font-family:var(--font-display,'Syne',sans-serif);font-size:18px;font-weight:800;color:#f87171">🚫 Ban User</div>
+      <button onclick="document.getElementById('_banOverlay').style.display='none'" style="background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);color:rgba(255,255,255,0.5);width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:14px">✕</button>
+    </div>
+    <div style="font-size:13px;color:rgba(255,255,255,0.45);margin-bottom:20px">"${userName}" ban karanna heba. Ban karala awal user eka sign out wela ban screen eka balanawe.</div>
+    <div style="font-size:12px;font-weight:600;color:rgba(255,255,255,0.5);letter-spacing:.5px;margin-bottom:10px">BAN REASON</div>
+    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:22px">
+      ${Object.entries(reasons).map(([k,v])=>`
+        <label style="display:flex;align-items:center;gap:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:10px 14px;cursor:pointer;transition:background .15s"
+          onmouseover="this.style.background='rgba(239,68,68,0.1)';this.style.borderColor='rgba(239,68,68,0.3)'"
+          onmouseout="this.style.background='rgba(255,255,255,0.04)';this.style.borderColor='rgba(255,255,255,0.08)'">
+          <input type="radio" name="banReason" value="${k}" style="accent-color:#f87171;width:15px;height:15px;flex-shrink:0" ${k==='sexual'?'checked':''}>
+          <span style="font-size:13px;font-weight:600;color:rgba(255,255,255,0.8)">${v}</span>
+        </label>`).join('')}
+    </div>
+    <div style="display:flex;gap:10px">
+      <button onclick="confirmBanUser('${uid}','${userName.replace(/'/g,"\\'")}',true)"
+        style="flex:1;background:linear-gradient(135deg,#ef4444,#b91c1c);color:white;border:none;border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;transition:opacity .15s"
+        onmouseover="this.style.opacity='.85'" onmouseout="this.style.opacity='1'">
+        🚫 Ban &amp; Delete All Content
+      </button>
+      <button onclick="confirmBanUser('${uid}','${userName.replace(/'/g,"\\'")}',false)"
+        style="flex:1;background:rgba(239,68,68,0.15);color:#f87171;border:1px solid rgba(239,68,68,0.3);border-radius:10px;padding:12px;font-size:14px;font-weight:700;cursor:pointer;transition:background .15s"
+        onmouseover="this.style.background='rgba(239,68,68,0.25)'" onmouseout="this.style.background='rgba(239,68,68,0.15)'">
+        🚫 Ban Only
+      </button>
+    </div>
+  </div>`;
+  ov.style.display='flex';
+};
+
+window.confirmBanUser = async function(uid, userName, deleteContent){
+  const reasonEl = document.querySelector('input[name="banReason"]:checked');
+  const reason = reasonEl ? reasonEl.value : 'other';
+  document.getElementById('_banOverlay').style.display='none';
+  try{
+    // Ban the user
+    await updateDoc(doc(db,'users',uid),{
+      isBanned: true,
+      bannedReason: reason,
+      bannedAt: serverTimestamp(),
+      bannedBy: CU.uid
+    });
+    // Delete all their projects if requested
+    if(deleteContent){
+      const pSnap = await getDocs(query(collection(db,'projects'),where('authorId','==',uid)));
+      await Promise.all(pSnap.docs.map(d=>deleteDoc(d.ref)));
+      await updateDoc(doc(db,'users',uid),{projectCount:0});
+    }
+    // Update local cache
+    const idx = _allUsers.findIndex(u=>u.id===uid);
+    if(idx>-1){ _allUsers[idx].isBanned=true; _allUsers[idx].bannedReason=reason; }
+    window.adminSearchUsers(document.getElementById('adminSearchInput')?.value||'');
+    showToast(`🚫 "${userName}" ban karala ${deleteContent?'content delete karala ':''}giyawa!`);
+  }catch(e){ showToast('❌ '+e.message); }
+};
+
+window.adminUnbanUser = async function(uid, userName){
+  if(!isAdmin()){ showToast('❌ Admin access naha'); return; }
+  if(!confirm(`"${userName}" ge ban eka gewannawada?`)) return;
+  try{
+    await updateDoc(doc(db,'users',uid),{isBanned:false, bannedReason:'', bannedAt:null, bannedBy:''});
+    const idx = _allUsers.findIndex(u=>u.id===uid);
+    if(idx>-1){ _allUsers[idx].isBanned=false; _allUsers[idx].bannedReason=''; }
+    window.adminSearchUsers(document.getElementById('adminSearchInput')?.value||'');
+    showToast(`✅ "${userName}" unban karala!`);
+  }catch(e){ showToast('❌ '+e.message); }
+};
+
 onAuthStateChanged(auth, async (user) => {
   if (user) {
     CU = user; window.CU = user;
     const snap = await getDoc(doc(db,"users",user.uid));
     CUD = snap.exists() ? snap.data() : {};
     window.CUD = CUD;
+    // ── Ban check ─────────────────────────────────────────────
+    if(CUD.isBanned){
+      await signOut(auth);
+      showBannedScreen(CUD.bannedReason||'');
+      return;
+    }
+    await checkProExpiry(user, CUD); // auto-deactivate if expired
     _isAdminCached = await checkAdminStatus(user.uid);
     updateNavLoggedIn();
     if(document.getElementById('page-dashboard').classList.contains('active')) loadDashboard();
@@ -163,7 +336,16 @@ window.doSignIn = async function(){
   if(!em||!pw){showToast('⚠️ Enter email and password');return;}
   try{
     showToast('Signing in...');
-    await signInWithEmailAndPassword(auth,em,pw);
+    const cred = await signInWithEmailAndPassword(auth,em,pw);
+    // ── Ban check before letting user in ─────────────────────
+    const uSnap = await getDoc(doc(db,'users',cred.user.uid));
+    const uData = uSnap.exists() ? uSnap.data() : {};
+    if(uData.isBanned){
+      await signOut(auth);
+      closeModal('auth');
+      showBannedScreen(uData.bannedReason||'');
+      return;
+    }
     closeModal('auth');
     showToast('✅ Welcome back!');
     showPage('dashboard');
@@ -655,8 +837,11 @@ window.loadPublicProjects = async function(category='all'){
         p.authorTitleBadge  = userMap[p.authorId].titleBadge   || '';
         p.authorNameStyle   = userMap[p.authorId].nameStyle    || 'default';
         p.authorProfileFrame= userMap[p.authorId].profileFrame || 'none';
+        p._authorBanned     = userMap[p.authorId].isBanned     || false;
       }
     });
+    // Hide projects from banned users
+    projects = projects.filter(p => !p._authorBanned);
     const bgs=['linear-gradient(135deg,#f093fb,#f5576c)','linear-gradient(135deg,#4facfe,#00f2fe)','linear-gradient(135deg,#43e97b,#38f9d7)','linear-gradient(135deg,#fa709a,#fee140)','linear-gradient(135deg,#a18cd1,#fbc2eb)','linear-gradient(135deg,#667eea,#764ba2)','linear-gradient(135deg,#f7971e,#ffd200)'];
     grid.innerHTML=projects.map((p,i)=>projectCard(p,bgs[i%bgs.length])).join('');
     projects.forEach(p=>{
@@ -890,10 +1075,22 @@ window.loadPublicCreatives = async function(type='all'){
   try{
     let snap=await getDocs(query(collection(db,"users"),orderBy("createdAt","desc")));
     let users=snap.docs.map(d=>({id:d.id,...d.data()}));
+
+    // ── Only show users who have uploaded at least 1 project ──
+    users = users.filter(u => (u.projectCount||0) > 0);
+    // ── Hide banned users ─────────────────────────────────────
+    users = users.filter(u => !u.isBanned);
+
     if(type!=='all'){
       const map={graphic:['graphic','brand','social','illustration'],video:['video','cinematographer','reels'],motion:['motion','3d']};
       users=users.filter(u=>map[type]?.some(k=>u.role?.toLowerCase().includes(k)));
     }
+
+    // ── Sort: Pro users first, then by totalLikes desc ─────────
+    users.sort((a,b)=>{
+      if(b.isPro !== a.isPro) return (b.isPro?1:0) - (a.isPro?1:0);
+      return (b.totalLikes||0) - (a.totalLikes||0);
+    });
     if(users.length===0){grid.innerHTML=emptyState('👥','No creators yet','Be the first to join!');return;}
     grid.innerHTML=users.map(c=>{
       const ini=(c.firstName?.[0]||'')+(c.lastName?.[0]||'');
@@ -1323,6 +1520,21 @@ window.markSysNotifRead = async function(id){
   }catch(e){ showToast('❌ '+e.message); }
 };
 
+window.deleteSystemNotif = async function(id){
+  if(!confirm('Delete this notification? This cannot be undone.')) return;
+  try{
+    await deleteDoc(doc(db,'notifications',id));
+    showToast('🗑 Notification deleted');
+    updateNotifBadge();
+    // Refresh panel
+    const panel = document.getElementById('notifPanel');
+    if(panel && panel.style.display==='block'){
+      panel.style.display='none';
+      toggleNotifPanel();
+    }
+  }catch(e){ showToast('❌ '+e.message); }
+};
+
 window.deleteInquiry = async function(id){
   if(!confirm('Delete this brief? This cannot be undone.')) return;
   try{
@@ -1664,23 +1876,50 @@ function jobCard(j){
   const isOwner=CU&&j.postedBy===CU.uid;
   const storeKey = j.id || ('static_'+Math.random().toString(36).slice(2));
   window._jobStore[storeKey] = j;
-  return `<div class="job-card" style="position:relative;cursor:pointer" onclick="openJobDetail('${storeKey}')">
-    <div class="job-icon">${j.icon||'🎨'}</div>
-    <div class="job-info">
-      <div class="job-title">${j.title}</div>
-      <div class="job-company">${j.company}</div>
+
+  // Pick a tint per category
+  const catColors = {
+    'Design':'rgba(168,85,247,0.18)','Video':'rgba(239,68,68,0.16)',
+    'Photo':'rgba(59,130,246,0.16)','Marketing':'rgba(16,185,129,0.16)',
+    'Writing':'rgba(234,179,8,0.16)','Music':'rgba(236,72,153,0.16)',
+  };
+  const catBorders = {
+    'Design':'rgba(168,85,247,0.35)','Video':'rgba(239,68,68,0.32)',
+    'Photo':'rgba(59,130,246,0.32)','Marketing':'rgba(16,185,129,0.32)',
+    'Writing':'rgba(234,179,8,0.32)','Music':'rgba(236,72,153,0.32)',
+  };
+  const iconBg  = catColors[j.category]  || 'rgba(255,140,30,0.12)';
+  const iconBdr = catBorders[j.category] || 'rgba(255,140,30,0.32)';
+
+  return `<div class="job-card" onclick="openJobDetail('${storeKey}')">
+    <div class="job-card-inner">
+      <div class="job-card-top">
+        <!-- Icon -->
+        <div class="job-icon" style="background:${iconBg};border-color:${iconBdr}">${j.icon||'🎨'}</div>
+
+        <!-- Info -->
+        <div class="job-info">
+          <div class="job-label">💼 ${j.category||'Job Opportunity'}</div>
+          <div class="job-title">${j.title}</div>
+          <div class="job-company">${j.company}</div>
+        </div>
+
+        <!-- Right: salary + action -->
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:10px;flex-shrink:0">
+          <div class="job-salary">${j.salary?'LKR '+j.salary+'/mo':'Negotiable'}</div>
+          ${isOwner
+            ? `<button onclick="event.stopPropagation();deleteJob('${j.id}',event)" class="job-delete-btn">🗑 Delete</button>`
+            : `<span class="job-apply-btn">Apply →</span>`
+          }
+        </div>
+      </div>
+
+      <!-- Tags row -->
       <div class="job-tags">
-        <span class="badge badge-gray">${j.type||'Full-time'}</span>
-        <span class="badge badge-gray">📍 ${j.location||'Sri Lanka'}</span>
+        <span class="badge">${j.type||'Full-time'}</span>
+        <span class="badge">📍 ${j.location||'Sri Lanka'}</span>
         ${j.category?`<span class="badge badge-purple">${j.category}</span>`:''}
       </div>
-    </div>
-    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0">
-      <div class="job-salary">${j.salary?'LKR '+j.salary:'Negotiable'}</div>
-      ${isOwner
-        ? `<button onclick="event.stopPropagation();deleteJob('${j.id}',event)" style="border:none;background:rgba(239,68,68,0.15);color:#f87171;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:11px;font-weight:600">🗑 Delete</button>`
-        : `<span style="background:var(--orange);color:white;border-radius:6px;padding:4px 12px;font-size:11px;font-weight:700;letter-spacing:.3px">Apply →</span>`
-      }
     </div>
   </div>`;
 }
@@ -1843,7 +2082,9 @@ function renderAdminUsers(users){
     const isPro = !!u.isPro;
     const isAdminUser = ADMIN_UIDS.includes(u.id) || !!u.isAdmin;
     const isSelf = CU && u.id === CU.uid;
-    return `<div style="background:var(--surface2);border:1px solid ${isVer?'rgba(59,130,246,0.35)':isPro?'rgba(255,92,0,0.25)':'var(--border)'};border-radius:12px;padding:14px 16px">
+    const isBanned = !!u.isBanned;
+    return `<div style="background:var(--surface2);border:1px solid ${isBanned?'rgba(239,68,68,0.45)':isVer?'rgba(59,130,246,0.35)':isPro?'rgba(255,92,0,0.25)':'var(--border)'};border-radius:12px;padding:14px 16px${isBanned?';opacity:0.75':''}">
+      ${isBanned?`<div style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.25);border-radius:8px;padding:7px 12px;margin-bottom:10px;font-size:12px;font-weight:600;color:#f87171;display:flex;align-items:center;gap:8px">🚫 BANNED <span style="font-weight:400;color:rgba(248,113,113,0.7)">${u.bannedReason||''}</span></div>`:''}
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
         <div style="width:44px;height:44px;border-radius:50%;background:${u.avatarColor||'#6B4EFF'};display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:white;flex-shrink:0;overflow:hidden;border:2px solid ${isVer?'#3b82f6':isPro?'var(--orange)':'transparent'}">
           ${u.avatarURL?`<img src="${u.avatarURL}" style="width:100%;height:100%;object-fit:cover">`:ini||'?'}
@@ -1864,7 +2105,8 @@ function renderAdminUsers(users){
             : `<button onclick="adminToggleVerified('${u.id}',true)"  style="background:rgba(59,130,246,0.15);color:#60a5fa;border:1px solid rgba(59,130,246,0.3);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">✓ Verify</button>`
           }
           ${isPro
-            ? `<button onclick="adminTogglePro('${u.id}',false)" style="background:rgba(239,68,68,0.12);color:#f87171;border:1px solid rgba(239,68,68,0.25);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">✕ Remove Pro</button>`
+            ? `<button onclick="adminTogglePro('${u.id}',false)" style="background:rgba(239,68,68,0.12);color:#f87171;border:1px solid rgba(239,68,68,0.25);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">✕ Remove Pro</button>
+               <button onclick="adminTestProExpiry('${u.id}')" style="background:rgba(234,179,8,0.12);color:#fbbf24;border:1px solid rgba(234,179,8,0.3);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer" title="Set expiry to 2 mins ago to test auto-deactivation">⚡ Test Expiry</button>`
             : `<button onclick="adminTogglePro('${u.id}',true)"  style="background:rgba(255,92,0,0.15);color:var(--orange);border:1px solid rgba(255,92,0,0.3);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">⭐ Give Pro</button>`
           }
           <button onclick="adminSetTitleBadge('${u.id}','${(u.titleBadge||'').replace(/'/g,"\\'")}','${name.replace(/'/g,"\\'")}')" style="background:linear-gradient(135deg,rgba(184,134,11,0.2),rgba(255,215,0,0.15));color:#ffd700;border:1px solid rgba(255,215,0,0.4);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">🏅 ${u.titleBadge?`"${u.titleBadge}"`:' Title Badge'}</button>
@@ -1872,6 +2114,10 @@ function renderAdminUsers(users){
             ? `<button onclick="adminToggleAdmin('${u.id}',false,'${name.replace(/'/g,"\\'")}')" style="background:rgba(124,58,237,0.15);color:#a78bfa;border:1px solid rgba(124,58,237,0.35);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">👑 Remove Admin</button>`
             : `<button onclick="adminToggleAdmin('${u.id}',true,'${name.replace(/'/g,"\\'")}')"  style="background:rgba(124,58,237,0.2);color:#a78bfa;border:1px solid rgba(124,58,237,0.4);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">👑 Make Admin</button>`
           ) : '<span style="font-size:11px;color:var(--text-muted);padding:6px 8px">You</span>'}
+          ${!isSelf ? (isBanned
+            ? `<button onclick="adminUnbanUser('${u.id}','${name.replace(/'/g,"\\'")}')" style="background:rgba(34,197,94,0.15);color:#4ade80;border:1px solid rgba(34,197,94,0.3);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">✅ Unban</button>`
+            : `<button onclick="adminBanUser('${u.id}','${name.replace(/'/g,"\\'")}')" style="background:rgba(239,68,68,0.12);color:#f87171;border:1px solid rgba(239,68,68,0.25);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer">🚫 Ban</button>`
+          ) : ''}
         </div>
       </div>
     </div>`;
@@ -1904,40 +2150,153 @@ window.adminToggleVerified = async function(uid, give){
 };
 
 window.adminTogglePro = async function(uid, give){
-  if(!isAdmin()){ showToast('❌ Admin access naha'); return; }
+  if(!isAdmin()){ showToast('❌ Admin access required'); return; }
+  if(give){
+    // Show duration picker instead of granting immediately
+    adminShowProDurationPicker(uid);
+    return;
+  }
+  // Remove Pro immediately
   try{
-    await updateDoc(doc(db,'users',uid), {isPro: give});
+    await updateDoc(doc(db,'users',uid),{
+      isPro: false, proExpiresAt: null, proActivatedAt: null
+    });
     const pSnap = await getDocs(query(collection(db,'projects'),where('authorId','==',uid)));
-    await Promise.all(pSnap.docs.map(d=>updateDoc(d.ref,{authorIsPro: give})));
+    await Promise.all(pSnap.docs.map(d=>updateDoc(d.ref,{authorIsPro:false})));
+    const idx = _allUsers.findIndex(u=>u.id===uid);
+    if(idx>-1){ _allUsers[idx].isPro=false; _allUsers[idx].proExpiresAt=null; }
+    window.adminSearchUsers(document.getElementById('adminSearchInput')?.value||'');
+    showToast('🗑 Pro removed');
+  }catch(e){ showToast('❌ '+e.message); }
+};
 
-    // ── Write system notification to user ────────────────
-    if(give){
-      // Get user name for personalised message
-      const uSnap = await getDoc(doc(db,'users',uid));
-      const uData = uSnap.exists() ? uSnap.data() : {};
-      const firstName = uData.firstName || 'Creative';
+// ── Duration Picker Overlay ───────────────────────────────────
+window.adminShowProDurationPicker = function(uid){
+  let ov = document.getElementById('proDurationOverlay');
+  if(!ov){
+    ov = document.createElement('div');
+    ov.id = 'proDurationOverlay';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.75);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:16px';
+    ov.onclick = function(e){ if(e.target===ov) ov.style.display='none'; };
+    document.body.appendChild(ov);
+  }
+  window._proPickerUID = uid;
 
-      // Calculate renewal date (30 days from now)
-      const renewDate = new Date();
-      renewDate.setDate(renewDate.getDate() + 30);
-      const renewStr = renewDate.toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'});
+  const presets = [
+    {label:'7 Days',  days:7,   desc:'1 week trial'},
+    {label:'30 Days', days:30,  desc:'1 month — standard'},
+    {label:'90 Days', days:90,  desc:'3 months'},
+    {label:'180 Days',days:180, desc:'6 months'},
+    {label:'365 Days',days:365, desc:'1 year'},
+  ];
 
-      await addDoc(collection(db,'notifications'),{
-        userId: uid,
-        type: 'pro_activated',
-        title: '🎉 Pro Plan Activated!',
-        message: `ඔබේ Creativo Pro plan එක successfully activate කළා! Unlimited projects, verified badge, analytics, සහ සියලු Pro features දැන් active. ❤️ ස්තූතියි ${firstName}!`,
-        renewalDate: renewStr,
-        renewalMessage: `📅 ඔබේ Pro plan renewal date එක ${renewStr}. දිගටම Pro member වෙලා ඉන්න renewal ගෙවන්නට අමතක කරන්න එපා!`,
-        read: false,
-        createdAt: serverTimestamp()
-      });
-    }
+  const presetHTML = presets.map(p=>`
+    <div class="pdp-preset" onclick="document.querySelectorAll('.pdp-preset').forEach(e=>{e.style.background='var(--surface2)';e.style.borderColor='var(--border)';e.style.color='var(--text-muted)'});this.style.background='rgba(255,92,0,0.15)';this.style.borderColor='rgba(255,92,0,0.55)';this.style.color='var(--orange)';document.getElementById('pdpCustomDays').value='${p.days}'"
+      style="background:var(--surface2);border:1px solid var(--border);border-radius:11px;padding:11px 14px;cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:space-between;gap:8px">
+      <span style="font-size:14px;font-weight:700">${p.label}</span>
+      <span style="font-size:11px;color:var(--text-muted)">${p.desc}</span>
+    </div>
+  `).join('');
+
+  ov.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border2);border-radius:22px;width:100%;max-width:400px;overflow:hidden">
+      <!-- Header -->
+      <div style="background:linear-gradient(135deg,rgba(255,92,0,0.18),rgba(255,140,50,0.08));padding:22px 24px 18px;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+          <div style="font-family:var(--font-display);font-size:18px;font-weight:900;color:var(--text)">⭐ Grant Pro Plan</div>
+          <button onclick="document.getElementById('proDurationOverlay').style.display='none'" style="background:var(--surface2);border:1px solid var(--border2);border-radius:50%;width:30px;height:30px;cursor:pointer;color:var(--text-muted);font-size:15px;display:flex;align-items:center;justify-content:center">✕</button>
+        </div>
+        <div style="font-size:12px;color:var(--text-muted)">Select how long Pro access should last</div>
+      </div>
+
+      <div style="padding:20px 24px 24px">
+        <!-- Preset buttons -->
+        <div style="font-size:11px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--text-muted);margin-bottom:10px">Quick Presets</div>
+        <div style="display:flex;flex-direction:column;gap:7px;margin-bottom:18px">
+          ${presetHTML}
+        </div>
+
+        <!-- Custom input -->
+        <div style="font-size:11px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px">Custom Duration</div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px">
+          <input id="pdpCustomDays" type="number" min="1" max="3650" placeholder="e.g. 45"
+            style="flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px 14px;font-size:15px;font-weight:700;color:var(--text);outline:none;font-family:var(--font-display)"
+            oninput="document.querySelectorAll('.pdp-preset').forEach(e=>{e.style.background='var(--surface2)';e.style.borderColor='var(--border)';e.style.color='var(--text)'})">
+          <span style="font-size:13px;color:var(--text-muted);white-space:nowrap;font-weight:600">days</span>
+        </div>
+
+        <!-- Expiry preview -->
+        <div id="pdpPreview" style="background:rgba(255,92,0,0.07);border:1px solid rgba(255,92,0,0.2);border-radius:10px;padding:10px 14px;font-size:12px;color:var(--text-muted);margin-bottom:18px;min-height:36px;line-height:1.6">
+          📅 Enter days above to see the expiry date
+        </div>
+
+        <!-- Confirm -->
+        <button onclick="adminGrantPro()" style="width:100%;background:linear-gradient(135deg,#f97316,#ea6a10);color:white;border:none;border-radius:12px;padding:13px;font-size:14px;font-weight:800;cursor:pointer;font-family:var(--font-display);letter-spacing:.2px">⭐ Grant Pro Access</button>
+      </div>
+    </div>
+  `;
+
+  ov.style.display = 'flex';
+
+  // Live expiry preview on input
+  setTimeout(()=>{
+    const inp = document.getElementById('pdpCustomDays');
+    const prev = document.getElementById('pdpPreview');
+    if(!inp||!prev) return;
+    const update = ()=>{
+      const d = parseInt(inp.value);
+      if(!d||d<1){ prev.innerHTML='📅 Enter days above to see the expiry date'; return; }
+      const exp = new Date(Date.now() + d*24*60*60*1000);
+      const str = exp.toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+      prev.innerHTML = `📅 Expires on <strong style="color:var(--orange)">${str}</strong> &nbsp;(${d} days from today)`;
+    };
+    inp.addEventListener('input', update);
+    // Trigger once if preset already set a value
+    if(inp.value) update();
+  }, 50);
+};
+
+// ── Actually grant Pro with selected duration ─────────────────
+window.adminGrantPro = async function(){
+  const uid = window._proPickerUID;
+  if(!uid){ showToast('❌ No user selected'); return; }
+  const days = parseInt(document.getElementById('pdpCustomDays')?.value);
+  if(!days || days < 1){ showToast('⚠️ Enter a valid number of days'); return; }
+
+  try{
+    const expiresAt = new Date(Date.now() + days*24*60*60*1000);
+
+    await updateDoc(doc(db,'users',uid),{
+      isPro: true,
+      proExpiresAt: Timestamp.fromDate(expiresAt),
+      proActivatedAt: serverTimestamp()
+    });
+    const pSnap = await getDocs(query(collection(db,'projects'),where('authorId','==',uid)));
+    await Promise.all(pSnap.docs.map(d=>updateDoc(d.ref,{authorIsPro:true})));
+
+    // Notification
+    const uSnap = await getDoc(doc(db,'users',uid));
+    const uData = uSnap.exists() ? uSnap.data() : {};
+    const firstName = uData.firstName || 'Creative';
+    const renewStr = expiresAt.toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'});
+    const dLabel = days===365 ? '1 year' : days===180 ? '6 months' : days===90 ? '3 months' : days===30 ? '1 month' : `${days} days`;
+
+    await addDoc(collection(db,'notifications'),{
+      userId: uid,
+      type: 'pro_activated',
+      title: '🎉 Pro Plan Activated!',
+      message: `Your Creativo Pro plan has been successfully activated, ${firstName}! You have ${dLabel} of Pro access. Unlimited projects, verified badge, analytics, and all Pro features are now active. Thank you for upgrading! ❤️`,
+      renewalDate: renewStr,
+      renewalMessage: `📅 Your Pro plan expires on ${renewStr}. Don't forget to renew before then to keep enjoying Pro membership!`,
+      read: false,
+      createdAt: serverTimestamp()
+    });
 
     const idx = _allUsers.findIndex(u=>u.id===uid);
-    if(idx>-1) _allUsers[idx].isPro = give;
+    if(idx>-1){ _allUsers[idx].isPro=true; _allUsers[idx].proExpiresAt=Timestamp.fromDate(expiresAt); }
     window.adminSearchUsers(document.getElementById('adminSearchInput')?.value||'');
-    showToast(give ? '⭐ Pro granted! Notification sent.' : '🗑 Pro removed');
+    document.getElementById('proDurationOverlay').style.display='none';
+    showToast(`⭐ Pro granted for ${dLabel}! Expires ${renewStr}`);
   }catch(e){ showToast('❌ '+e.message); }
 };
 
@@ -2399,6 +2758,7 @@ window.toggleNotifPanel=async function(){
           ${n.renewalMessage?`<div style="background:rgba(255,92,0,0.08);border:1px solid rgba(255,92,0,0.18);border-radius:8px;padding:8px 12px;font-size:11px;color:var(--text-muted);line-height:1.6;margin-bottom:8px">${n.renewalMessage}</div>`:''}
           <div style="display:flex;gap:6px">
             ${unread?`<button onclick="markSysNotifRead('${n.id}')" style="font-size:11px;background:var(--surface3);color:var(--text-muted);padding:6px 12px;border-radius:8px;border:1px solid var(--border);cursor:pointer;font-weight:500">✓ Mark Read</button>`:'<span style="font-size:10px;color:var(--text-light);padding:4px 0">✓ Read</span>'}
+            <button onclick="deleteSystemNotif('${n.id}')" style="font-size:12px;background:rgba(239,68,68,0.12);color:#f87171;padding:6px 10px;border-radius:8px;border:none;cursor:pointer;font-weight:600" title="Delete notification">🗑 Delete</button>
           </div>
         </div>`;
       }).join('');
@@ -2687,15 +3047,92 @@ nav{position:sticky;top:0;z-index:200;background:rgba(13,13,13,.92);backdrop-fil
 .verified-badge svg{width:12px;height:12px;fill:white;}
 
 /* JOBS */
-.jobs-list{display:flex;flex-direction:column;gap:12px;}
-.job-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px 24px;display:flex;align-items:center;gap:20px;transition:all .18s;cursor:pointer;}
-.job-card:hover{border-color:var(--orange);}
-.job-icon{width:48px;height:48px;border-radius:12px;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0;}
-.job-info{flex:1;}
-.job-title{font-family:var(--font-display);font-size:15px;font-weight:700;color:var(--text);margin-bottom:4px;}
-.job-company{font-size:13px;color:var(--text-muted);}
-.job-tags{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
-.job-salary{font-family:var(--font-display);font-size:16px;font-weight:700;color:var(--orange);white-space:nowrap;}
+.jobs-list{display:flex;flex-direction:column;gap:16px;}
+
+.job-card{
+  position:relative;cursor:pointer;border-radius:22px;overflow:hidden;
+  box-shadow:0 8px 32px rgba(0,0,0,0.38);
+  border:1.5px solid rgba(255,160,50,0.22);
+  transition:transform .22s cubic-bezier(.34,1.1,.64,1),
+             box-shadow .22s ease,
+             border-color .22s ease;
+  background:linear-gradient(135deg,#1e0e00 0%,#211000 40%,#130900 100%);
+}
+.job-card:hover{
+  transform:translateY(-3px) scale(1.008);
+  box-shadow:0 16px 48px rgba(0,0,0,0.55);
+  border-color:rgba(255,160,50,0.55);
+}
+.job-card-inner{
+  padding:24px 26px 20px;
+  position:relative;overflow:hidden;
+}
+/* Decorative blobs */
+.job-card-inner::before{
+  content:'';position:absolute;top:-40px;right:-40px;
+  width:180px;height:180px;border-radius:50%;
+  background:radial-gradient(circle,rgba(255,140,30,0.13) 0%,transparent 70%);
+  pointer-events:none;
+}
+.job-card-inner::after{
+  content:'';position:absolute;bottom:-30px;left:-20px;
+  width:130px;height:130px;border-radius:50%;
+  background:radial-gradient(circle,rgba(255,140,30,0.07) 0%,transparent 70%);
+  pointer-events:none;
+}
+
+.job-card-top{display:flex;align-items:center;gap:16px;flex-wrap:wrap;position:relative;z-index:1;}
+
+.job-icon{
+  width:62px;height:62px;border-radius:18px;
+  background:rgba(255,140,30,0.12);
+  border:1.5px solid rgba(255,140,30,0.32);
+  display:flex;align-items:center;justify-content:center;
+  font-size:28px;flex-shrink:0;
+  box-shadow:0 4px 18px rgba(255,140,30,0.18);
+}
+.job-info{flex:1;min-width:0;}
+.job-label{font-size:11px;font-weight:700;letter-spacing:1.1px;text-transform:uppercase;color:rgba(255,160,50,0.75);margin-bottom:5px;}
+.job-title{font-family:var(--font-display);font-size:17px;font-weight:900;color:#fff;line-height:1.2;margin-bottom:4px;}
+.job-company{font-size:13px;color:rgba(255,255,255,0.45);}
+.job-tags{display:flex;gap:7px;margin-top:10px;flex-wrap:wrap;position:relative;z-index:1;}
+.job-tags .badge{
+  background:rgba(255,255,255,0.05);
+  border:1px solid rgba(255,255,255,0.1);
+  color:rgba(255,255,255,0.5);
+  border-radius:100px;padding:4px 11px;
+  font-size:11px;font-weight:600;
+}
+.job-tags .badge-purple{
+  background:rgba(168,85,247,0.12);
+  border-color:rgba(168,85,247,0.3);
+  color:rgba(200,150,255,0.9);
+}
+.job-salary{
+  font-family:var(--font-display);font-size:17px;font-weight:900;
+  color:#fff;white-space:nowrap;
+  background:linear-gradient(135deg,var(--orange,#f97316),#fbbf24);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  background-clip:text;
+}
+.job-apply-btn{
+  display:inline-flex;align-items:center;gap:6px;
+  background:linear-gradient(135deg,#f97316,#ea6a10);
+  color:#fff;border:none;border-radius:11px;
+  padding:10px 18px;font-size:13px;font-weight:800;
+  cursor:pointer;text-decoration:none;white-space:nowrap;
+  box-shadow:0 4px 16px rgba(249,115,22,0.38);
+  transition:transform .18s,filter .18s;
+  font-family:var(--font-display);
+}
+.job-apply-btn:hover{filter:brightness(1.12);transform:scale(1.05);}
+.job-delete-btn{
+  border:none;background:rgba(239,68,68,0.15);
+  color:#f87171;border-radius:8px;
+  padding:7px 13px;cursor:pointer;font-size:12px;font-weight:700;
+  transition:background .15s;
+}
+.job-delete-btn:hover{background:rgba(239,68,68,0.28);}
 
 /* PRICING */
 .pricing-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;max-width:700px;margin:0 auto;}
@@ -3102,20 +3539,17 @@ html{scroll-behavior:smooth;}
   .profile-name{font-size:14px;}
 
   /* ── JOBS — compact mobile cards ── */
-  .jobs-list{gap:8px;padding:0 12px 16px;}
-  .job-card{
-    padding:12px;
-    gap:10px;
-    border-radius:12px;
-    align-items:flex-start;
-  }
-  .job-icon{width:36px;height:36px;font-size:16px;border-radius:10px;flex-shrink:0;}
-  .job-info{flex:1;min-width:0;}
-  .job-title{font-size:13px;margin-bottom:2px;}
-  .job-company{font-size:11px;}
-  .job-tags{gap:4px;margin-top:6px;}
-  .job-tags .badge{font-size:10px;padding:2px 7px;}
-  .job-salary{font-size:13px;white-space:nowrap;}
+  .jobs-list{gap:12px;padding:0 12px 16px;}
+  .job-card{ border-radius:18px; }
+  .job-card-inner{ padding:18px 18px 14px; }
+  .job-icon{width:48px;height:48px;font-size:22px;border-radius:14px;}
+  .job-label{font-size:10px;}
+  .job-title{font-size:15px;}
+  .job-company{font-size:12px;}
+  .job-tags{gap:5px;margin-top:8px;}
+  .job-tags .badge{font-size:10px;padding:3px 9px;}
+  .job-salary{font-size:15px;}
+  .job-apply-btn{padding:8px 14px;font-size:12px;}
 
   /* ── PRICING ── */
   .pricing-grid{grid-template-columns:1fr;padding:0 12px;}
@@ -3787,7 +4221,7 @@ html{scroll-behavior:smooth;}
     <p style="margin-top:20px;font-size:13px;color:var(--text-muted)">Payment via bank transfer · Activated within 24hrs after WhatsApp confirmation</p>
 
     <!-- ── CLAIM OFFER AD CARD (dynamic — filled by renderPricingPageAd) ── -->
-    <div id="pricingClaimAd" style="margin:36px auto 48px;max-width:640px;border-radius:22px;overflow:hidden;position:relative;cursor:pointer;box-shadow:0 20px 60px rgba(0,0,0,0.5);display:none" onclick="openClaimOfferWA()"></div>
+    <div id="pricingClaimAd" style="margin:36px auto 48px;max-width:640px;border-radius:22px;overflow:hidden;position:relative;cursor:pointer;box-shadow:0 20px 60px rgba(0,0,0,0.5);display:none"></div>
 
   </div>
 </div>
@@ -4679,6 +5113,8 @@ function setTabActive(el,containerId){
   el.classList.add('active');
 }
 function openModal(name){
+  // Blocked when ban screen is active
+  if(window._bannedActive && name === 'auth') return;
   document.getElementById('modal-'+name).classList.add('open');
   if(name === 'upgrade'){
     const btn = document.getElementById('upgradeWaBtn');
@@ -5522,7 +5958,7 @@ window.renderPricingAds = function(ads){
     }
     // update queue with fresh list (keep position)
     window._paState.queue = ads;
-    renderPricingPageAd(ads.length > 0 ? ads[0] : null);
+    renderPricingPageAd(ads);
     return;
   }
 
@@ -5538,86 +5974,130 @@ window.renderPricingAds = function(ads){
     window._paState.queue = ads;
   }
 
-  // ── Update pricing page inline ad card ──────────────────
-  renderPricingPageAd(ads && ads.length > 0 ? ads[0] : null);
+  // ── Update pricing page inline ad cards ──────────────────
+  renderPricingPageAd(ads || []);
 };
 
-// ── Render the inline ad card on the pricing page ────────────
-function renderPricingPageAd(ad){
-  const card = document.getElementById('pricingClaimAd');
-  if(!card) return;
+// ── Render ALL ads as stacked cards on the pricing page ───────
+const _pricingPageBgMap = {
+  orange:'linear-gradient(135deg,#1e0e00 0%,#2a1400 35%,#150900 65%,#1e0e00 100%)',
+  purple:'linear-gradient(135deg,#0e0b1e 0%,#15112a 35%,#090714 65%,#0e0b1e 100%)',
+  green: 'linear-gradient(135deg,#0a2016 0%,#0f2d1c 35%,#071810 65%,#0a2016 100%)',
+  blue:  'linear-gradient(135deg,#060f1e 0%,#0b1829 35%,#040b14 65%,#060f1e 100%)',
+  gold:  'linear-gradient(135deg,#1a1000 0%,#261800 35%,#110c00 65%,#1a1000 100%)',
+  pink:  'linear-gradient(135deg,#1e0612 0%,#2a0a1a 35%,#14040e 65%,#1e0612 100%)',
+};
 
-  if(!ad){
-    card.style.display = 'none';
-    return;
-  }
-
-  card.style.display = 'block';
-  const c = PA_COLORS[ad.color||'orange'] || PA_COLORS.orange;
-
-  // Color-adaptive background based on ad color
-  const bgMap = {
-    orange: 'linear-gradient(135deg,#1e0e00 0%,#2a1400 35%,#150900 65%,#1e0e00 100%)',
-    purple: 'linear-gradient(135deg,#0e0b1e 0%,#15112a 35%,#090714 65%,#0e0b1e 100%)',
-    green:  'linear-gradient(135deg,#0a2016 0%,#0f2d1c 35%,#071810 65%,#0a2016 100%)',
-    blue:   'linear-gradient(135deg,#060f1e 0%,#0b1829 35%,#040b14 65%,#060f1e 100%)',
-    gold:   'linear-gradient(135deg,#1a1000 0%,#261800 35%,#110c00 65%,#1a1000 100%)',
-    pink:   'linear-gradient(135deg,#1e0612 0%,#2a0a1a 35%,#14040e 65%,#1e0612 100%)',
-  };
-  const bg = bgMap[ad.color||'orange'] || bgMap.orange;
-
-  // CTA label
+function buildPricingAdCard(ad){
+  const c  = PA_COLORS[ad.color||'orange'] || PA_COLORS.orange;
+  const bg = _pricingPageBgMap[ad.color||'orange'] || _pricingPageBgMap.orange;
   const ctaLabel = (ad.cta && ad.cta.trim()) ? ad.cta.trim() : 'Claim Offer';
-
-  card.innerHTML = `
-    <div style="position:absolute;inset:0;border-radius:22px;pointer-events:none;z-index:2;border:1.5px solid ${c.border}"></div>
-    <div style="background:${bg};padding:32px 32px 28px;position:relative;overflow:hidden">
+  const wrap = document.createElement('div');
+  wrap.dataset.adId = ad.id;
+  wrap.style.cssText = [
+    'border-radius:22px;overflow:hidden;position:relative;cursor:pointer',
+    'box-shadow:0 20px 60px rgba(0,0,0,0.5)',
+    'border:1.5px solid '+c.border,
+    'opacity:0;transform:translateY(18px)',
+    'transition:opacity .38s ease,transform .38s ease',
+  ].join(';');
+  wrap.innerHTML = `
+    <div style="background:${bg};padding:30px 30px 24px;position:relative;overflow:hidden">
       <div style="position:absolute;top:-40px;right:-40px;width:180px;height:180px;border-radius:50%;background:radial-gradient(circle,${c.glow} 0%,transparent 70%);pointer-events:none"></div>
-      <div style="position:absolute;bottom:-30px;left:-20px;width:130px;height:130px;border-radius:50%;background:radial-gradient(circle,${c.glow.replace('0.28','0.14')} 0%,transparent 70%);pointer-events:none"></div>
-
-      <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;position:relative;z-index:1">
-        <!-- Icon -->
-        <div style="width:68px;height:68px;border-radius:20px;background:${c.bg};border:1.5px solid ${c.border};display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:32px;box-shadow:0 6px 24px ${c.glow}">
+      <div style="position:absolute;bottom:-30px;left:-20px;width:120px;height:120px;border-radius:50%;background:radial-gradient(circle,${c.glow} 0%,transparent 70%);opacity:.6;pointer-events:none"></div>
+      <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;position:relative;z-index:1">
+        <div style="width:62px;height:62px;border-radius:18px;background:${c.bg};border:1.5px solid ${c.border};display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:30px;box-shadow:0 6px 20px ${c.glow}">
           ${c.icon}
         </div>
-
-        <!-- Text -->
-        <div style="flex:1;min-width:200px;text-align:left">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
-            <span style="font-size:11px;font-weight:700;letter-spacing:1.1px;text-transform:uppercase;color:${c.border}">🎉 Special Offer</span>
-          </div>
-          <div style="font-family:var(--font-display,'Syne',sans-serif);font-size:21px;font-weight:900;color:#fff;line-height:1.2;margin-bottom:7px">${ad.title||'Special Offer'}</div>
-          <div style="font-size:13px;color:rgba(255,255,255,0.45);line-height:1.6">${ad.body||''}</div>
+        <div style="flex:1;min-width:180px;text-align:left">
+          <div style="font-size:11px;font-weight:700;letter-spacing:1.1px;text-transform:uppercase;color:${c.border};margin-bottom:5px">🎉 Special Offer</div>
+          <div style="font-family:var(--font-display,'Syne',sans-serif);font-size:20px;font-weight:900;color:#fff;line-height:1.2;margin-bottom:6px">${ad.title||'Special Offer'}</div>
+          <div style="font-size:13px;color:rgba(255,255,255,0.45);line-height:1.55">${ad.body||''}</div>
         </div>
-
-        <!-- CTA -->
-        <a href="#" onclick="event.preventDefault();openClaimOfferWA()"
-          style="display:inline-flex;align-items:center;gap:8px;
-            background:${c.grad};
-            color:#fff;border:none;border-radius:13px;padding:13px 22px;
-            font-size:14px;font-weight:800;cursor:pointer;text-decoration:none;
+        <a href="#" onclick="event.preventDefault();event.stopPropagation();openClaimOfferWA(window._latestPricingAds&&window._latestPricingAds.find(function(a){return a.id==='${ad.id}';}))"
+          style="display:inline-flex;align-items:center;gap:7px;
+            background:${c.grad};color:#fff;border:none;border-radius:12px;
+            padding:12px 20px;font-size:13px;font-weight:800;cursor:pointer;text-decoration:none;
             font-family:var(--font-display,'Syne',sans-serif);white-space:nowrap;flex-shrink:0;
-            box-shadow:0 6px 24px ${c.glow};
-            transition:transform .18s,filter .18s"
-          onmouseover="this.style.filter='brightness(1.12)';this.style.transform='scale(1.04)'"
+            box-shadow:0 6px 22px ${c.glow};transition:transform .18s,filter .18s"
+          onmouseover="this.style.filter='brightness(1.12)';this.style.transform='scale(1.05)'"
           onmouseout="this.style.filter='';this.style.transform=''">
           ${ctaLabel}
         </a>
       </div>
-
-      <!-- Bottom pills -->
-      <div style="display:flex;gap:10px;margin-top:20px;flex-wrap:wrap;position:relative;z-index:1">
-        <div style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:100px;padding:5px 12px;font-size:11px;color:rgba(255,255,255,0.5);font-weight:600">✅ WhatsApp හරහා</div>
-        <div style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:100px;padding:5px 12px;font-size:11px;color:rgba(255,255,255,0.5);font-weight:600">⚡ 24hrs activate</div>
-        <div style="display:flex;align-items:center;gap:6px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:100px;padding:5px 12px;font-size:11px;color:rgba(255,255,255,0.5);font-weight:600">🔒 Bank Transfer</div>
+      <div style="display:flex;gap:8px;margin-top:18px;flex-wrap:wrap;position:relative;z-index:1">
+        <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:100px;padding:4px 11px;font-size:11px;color:rgba(255,255,255,0.45);font-weight:600">✅ WhatsApp හරහා</div>
+        <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:100px;padding:4px 11px;font-size:11px;color:rgba(255,255,255,0.45);font-weight:600">⚡ 24hrs activate</div>
+        <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);border-radius:100px;padding:4px 11px;font-size:11px;color:rgba(255,255,255,0.45);font-weight:600">🔒 Bank Transfer</div>
       </div>
     </div>
   `;
+  wrap.addEventListener('click', function(){ 
+    const a = window._latestPricingAds && window._latestPricingAds.find(function(x){return x.id===wrap.dataset.adId;});
+    openClaimOfferWA(a); 
+  });
+  return wrap;
+}
+
+function renderPricingPageAd(ads){
+  const container = document.getElementById('pricingClaimAd');
+  if(!container) return;
+
+  // Accept single ad or array
+  const list = Array.isArray(ads) ? ads : (ads ? [ads] : []);
+
+  if(list.length === 0){
+    container.style.display = 'none';
+    container.innerHTML = '';
+    return;
+  }
+
+  container.style.display = 'block';
+  container.style.cssText += ';cursor:default;box-shadow:none;border-radius:0;overflow:visible';
+
+  // Get existing card ids
+  const existingIds = new Set(
+    Array.from(container.querySelectorAll('[data-ad-id]')).map(el => el.dataset.adId)
+  );
+  const newIds = new Set(list.map(a => a.id));
+
+  // Remove deleted cards with slide-out animation
+  existingIds.forEach(id => {
+    if(!newIds.has(id)){
+      const el = container.querySelector('[data-ad-id="'+id+'"]');
+      if(el){
+        el.style.opacity   = '0';
+        el.style.transform = 'translateY(-12px)';
+        el.style.maxHeight = el.offsetHeight + 'px';
+        el.style.transition = 'opacity .3s ease,transform .3s ease,max-height .35s ease .1s,margin .35s ease .1s';
+        setTimeout(()=>{
+          el.style.maxHeight = '0';
+          el.style.marginBottom = '0';
+          el.style.overflow = 'hidden';
+        }, 50);
+        setTimeout(()=> el.remove(), 420);
+      }
+    }
+  });
+
+  // Add new cards
+  list.forEach((ad, i) => {
+    if(!existingIds.has(ad.id)){
+      const card = buildPricingAdCard(ad);
+      card.style.marginBottom = '18px';
+      container.appendChild(card);
+      // Staggered fade-in
+      setTimeout(()=>{
+        card.style.opacity   = '1';
+        card.style.transform = 'translateY(0)';
+      }, 60 + i * 80);
+    }
+  });
 }
 
 // Initial render attempt (in case ads already loaded before this script ran)
 if(window._latestPricingAds !== undefined){
-  renderPricingPageAd(window._latestPricingAds.length > 0 ? window._latestPricingAds[0] : null);
+  renderPricingPageAd(window._latestPricingAds);
 }
 
 // ── Admin: list ads in panel ─────────────────────────────────
@@ -5764,8 +6244,8 @@ document.getElementById('pricingAdOverlay').addEventListener('click', function(e
 
       <!-- Tag line -->
       <div style="font-size:11px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:rgba(37,211,102,0.7);margin-bottom:6px">🎉 Limited Time Offer</div>
-      <div style="font-family:var(--font-display,'Syne',sans-serif);font-size:24px;font-weight:900;color:#fff;line-height:1.15;margin-bottom:6px">Claim Your<br><span class="cop-offer-badge">Pro Plan Offer</span></div>
-      <div style="font-size:13px;color:rgba(255,255,255,0.45);margin-top:4px">Creativo · Special offer · WhatsApp හරහා activate කරගන්න</div>
+      <div id="copAdTitle" style="font-family:var(--font-display,'Syne',sans-serif);font-size:22px;font-weight:900;color:#fff;line-height:1.2;margin-bottom:8px">Special Offer</div>
+      <div id="copAdBody" style="font-size:13px;color:rgba(255,255,255,0.6);line-height:1.6;margin-bottom:4px"></div>
     </div>
 
     <!-- Body -->
@@ -5824,9 +6304,33 @@ document.getElementById('pricingAdOverlay').addEventListener('click', function(e
 </div>
 
 <script>
-window.openClaimOfferWA = function(){
+window.openClaimOfferWA = function(ad){
   const panel = document.getElementById('claimOfferPanel');
   if(!panel) return;
+
+  // ── If no ad passed, try to get first active ad ──────────
+  if(!ad && window._latestPricingAds && window._latestPricingAds.length > 0){
+    ad = window._latestPricingAds[0];
+  }
+
+  // ── Update panel content with ad details ─────────────────
+  const titleEl = document.getElementById('copAdTitle');
+  const bodyEl  = document.getElementById('copAdBody');
+  const waBtn   = document.getElementById('copWaBtn');
+
+  if(ad && titleEl) titleEl.textContent = ad.title || 'Special Offer';
+  if(ad && bodyEl)  bodyEl.textContent  = ad.body  || '';
+
+  // ── Build WA message with offer details ──────────────────
+  if(waBtn){
+    const offerTitle = ad ? ad.title : 'Special Offer';
+    const offerBody  = ad ? ad.body  : '';
+    const msg = offerBody
+      ? `Hi! I want to claim this offer from Creativo:\n\n*${offerTitle}*\n${offerBody}`
+      : `Hi! I want to claim the Creativo Pro offer: *${offerTitle}*`;
+    waBtn.href = 'https://wa.me/94723961127?text=' + encodeURIComponent(msg);
+  }
+
   panel.style.display = 'flex';
   requestAnimationFrame(()=>{
     requestAnimationFrame(()=>{ panel.classList.add('cop-visible'); });
@@ -5918,7 +6422,7 @@ window.closeClaimOfferPanel = function(){
 
       <!-- CTA + close row -->
       <div style="display:flex;gap:10px;flex-wrap:wrap">
-        <button id="paOverlayCta" onclick="openClaimOfferWA();closePricingAd()" style="flex:1;min-width:140px;color:#fff;border:none;border-radius:11px;padding:13px 20px;font-size:14px;font-weight:700;cursor:pointer;transition:transform .18s,box-shadow .18s;font-family:var(--font-display,'Syne',sans-serif)" onmouseover="this.style.transform='scale(1.03)'" onmouseout="this.style.transform=''">Claim Offer</button>
+        <button id="paOverlayCta" onclick="(function(){var a=window._latestPricingAds&&window._latestPricingAds.find(function(x){return x.id===window._paState.shownId;});openClaimOfferWA(a);closePricingAd();})()" style="flex:1;min-width:140px;color:#fff;border:none;border-radius:11px;padding:13px 20px;font-size:14px;font-weight:700;cursor:pointer;transition:transform .18s,box-shadow .18s;font-family:var(--font-display,'Syne',sans-serif)" onmouseover="this.style.transform='scale(1.03)'" onmouseout="this.style.transform=''">Claim Offer</button>
         <button onclick="closePricingAd()" style="background:var(--surface2,#222);border:1px solid var(--border2,#333);color:var(--text-muted,#888);border-radius:11px;padding:13px 18px;font-size:13px;font-weight:600;cursor:pointer;transition:background .15s;white-space:nowrap" onmouseover="this.style.background='var(--surface3,#2a2a2a)'" onmouseout="this.style.background='var(--surface2,#222)'">Maybe later</button>
       </div>
     </div>
