@@ -213,6 +213,8 @@ window.adminUnbanUser = async function(uid, userName){
   }catch(e){ showToast('❌ '+e.message); }
 };
 
+let unsubBanListener = null;
+
 onAuthStateChanged(auth, async (user) => {
   if (user) {
     CU = user; window.CU = user;
@@ -231,6 +233,17 @@ onAuthStateChanged(auth, async (user) => {
     if(document.getElementById('page-dashboard').classList.contains('active')) loadDashboard();
     if(document.getElementById('page-jobs').classList.contains('active')) loadJobs();
     subscribeInquiries();
+    // ── Real-time ban listener ────────────────────────────────
+    if(unsubBanListener){ unsubBanListener(); unsubBanListener=null; }
+    unsubBanListener = onSnapshot(doc(db,'users',user.uid), async (snap)=>{
+      if(!snap.exists()) return;
+      const d = snap.data();
+      if(d.isBanned){
+        if(unsubBanListener){ unsubBanListener(); unsubBanListener=null; }
+        await signOut(auth);
+        showBannedScreen(d.bannedReason||'');
+      }
+    });
   } else {
     CU = null; CUD = null;
     window.CU = null; window.CUD = null;
@@ -238,6 +251,7 @@ onAuthStateChanged(auth, async (user) => {
     updateNavLoggedOut();
     if(unsubInquiries){ unsubInquiries(); unsubInquiries=null; }
     if(unsubNotifications){ unsubNotifications(); unsubNotifications=null; }
+    if(unsubBanListener){ unsubBanListener(); unsubBanListener=null; }
     document.getElementById('notifDot').style.display='none';
   }
   // Handle ?user= deep link once after first auth resolve
