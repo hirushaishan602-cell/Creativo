@@ -3380,6 +3380,28 @@ document.addEventListener('click',e=>{
   let _dmConvos = [];
   let _unreadCount = 0;
 
+  // ── WebRTC voice state ────────────────────────────────────
+  const ICE_SERVERS = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'turn:openrelay.metered.ca:80', username:'openrelayproject', credential:'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443', username:'openrelayproject', credential:'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username:'openrelayproject', credential:'openrelayproject' }
+    ]
+  };
+  let _localStream = null;
+  let _peerConnections = {};   // uid -> RTCPeerConnection
+  let _peerUnsubs = {};        // uid -> [unsub fns]
+  let _remoteAudioEls = {};    // uid -> <audio>
+  let _unsubVoicePresence = null; // stays alive while in the room, independent of which tab is open
+
+  // ── typing indicator state ─────────────────────────────────
+  let _typingSelfTimer = null;
+  let _typingLastSentAt = 0;
+  let _unsubTyping = null;
+  let _typingUsers = {};       // uid -> true
+
   // ── helpers ────────────────────────────────────────────────
   function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
   function avatarHTML(name, photoURL, size=32){
@@ -3484,6 +3506,21 @@ document.addEventListener('click',e=>{
 .crv-msg.mine .crv-msg-meta{justify-content:flex-end;}
 .crv-msg-name{font-weight:700;font-size:10px;color:var(--text-muted,#888);margin-bottom:2px;}
 .crv-msg.mine .crv-msg-name{text-align:right;}
+
+/* typing indicator */
+.crv-typing-row{display:flex;gap:8px;align-items:flex-end;}
+.crv-typing-bubble{
+  background:var(--surface2,#252525);border-radius:14px 14px 14px 4px;
+  padding:10px 14px;display:flex;align-items:center;gap:4px;
+}
+.crv-typing-bubble span{
+  width:6px;height:6px;border-radius:50%;
+  background:var(--text-muted,#999);display:inline-block;
+  animation:crvTypingBounce 1.3s infinite ease-in-out;
+}
+.crv-typing-bubble span:nth-child(2){animation-delay:.15s;}
+.crv-typing-bubble span:nth-child(3){animation-delay:.3s;}
+@keyframes crvTypingBounce{0%,60%,100%{transform:translateY(0);opacity:.4;}30%{transform:translateY(-5px);opacity:1;}}
 
 /* input bar */
 .crv-input-bar{
@@ -3716,6 +3753,7 @@ document.addEventListener('click',e=>{
   function subscribeChannel(channelId){
     const msgList = document.getElementById('crvMsgList');
     if(!msgList) return;
+    subscribeTyping(false, channelId);
     // Try composite query first; fall back to client-side filter if index missing
     const qComposite = query(
       collection(db,'communityChat'),
@@ -3740,12 +3778,86 @@ document.addEventListener('click',e=>{
     });
   }
 
+  // ── typing indicator (WhatsApp-style bouncing dots) ────────
+  function isRecentTyping(ts){
+    if(!ts || !ts.toDate) return false;
+    return (Date.now() - ts.toDate().getTime()) < 6000; // stale after 6s
+  }
+
+  function subscribeTyping(isDM, key){
+    if(_unsubTyping){ _unsubTyping(); _unsubTyping=null; }
+    if(!key) return;
+    const col = isDM ? 'communityDMTyping' : 'communityChatTyping';
+    _unsubTyping = onSnapshot(doc(db,col,key), snap=>{
+      const data = snap.exists() ? snap.data() : {};
+      const myUID = window.CU?.uid;
+      _typingUsers = {};
+      Object.keys(data||{}).forEach(uid=>{
+        if(uid===myUID) return;
+        if(isRecentTyping(data[uid])) _typingUsers[uid] = data.__names?.[uid] || true;
+      });
+      renderTypingIndicator();
+    }, ()=>{});
+  }
+
+  function renderTypingIndicator(){
+    const msgList = document.getElementById('crvMsgList');
+    if(!msgList) return;
+    let row = document.getElementById('crvTypingRow');
+    const someoneTyping = Object.keys(_typingUsers).length>0;
+    if(someoneTyping){
+      if(!row){
+        row = document.createElement('div');
+        row.id = 'crvTypingRow';
+        row.className = 'crv-typing-row';
+        row.innerHTML = `<div style="width:30px;flex-shrink:0"></div><div class="crv-typing-bubble"><span></span><span></span><span></span></div>`;
+        msgList.appendChild(row);
+      } else {
+        msgList.appendChild(row); // keep it pinned to the bottom
+      }
+      msgList.scrollTop = msgList.scrollHeight;
+    } else if(row){
+      row.remove();
+    }
+  }
+
+  // Called on every keystroke in the message box
+  window._crvNotifyTyping = function(isDM){
+    const cu = window.CU; const cud = window.CUD;
+    if(!cu) return;
+    const inp = document.getElementById('crvMsgInput');
+    const hasText = !!(inp && inp.value.trim().length>0);
+    const key = isDM && _dmTarget ? [cu.uid,_dmTarget.uid].sort().join('_') : _activeChannel;
+    const col = isDM ? 'communityDMTyping' : 'communityChatTyping';
+    const name = ((cud?.firstName||'')+' '+(cud?.lastName||'')).trim() || cu.displayName || cu.email?.split('@')[0] || 'User';
+    clearTimeout(_typingSelfTimer);
+    if(hasText){
+      const now = Date.now();
+      if(now - _typingLastSentAt > 2000){ // throttle writes to every 2s
+        _typingLastSentAt = now;
+        setDoc(doc(db,col,key), { [cu.uid]: serverTimestamp(), __names: { [cu.uid]: name } }, {merge:true}).catch(()=>{});
+      }
+      _typingSelfTimer = setTimeout(()=>window._crvStopTyping(isDM), 3000);
+    } else {
+      window._crvStopTyping(isDM);
+    }
+  };
+
+  window._crvStopTyping = function(isDM){
+    const cu = window.CU; if(!cu) return;
+    _typingLastSentAt = 0;
+    const key = isDM && _dmTarget ? [cu.uid,_dmTarget.uid].sort().join('_') : _activeChannel;
+    const col = isDM ? 'communityDMTyping' : 'communityChatTyping';
+    setDoc(doc(db,col,key), { [cu.uid]: null }, {merge:true}).catch(()=>{});
+  };
+
   function renderMessages(msgs){
     const msgList = document.getElementById('crvMsgList');
     if(!msgList) return;
     const myUID = window.CU?.uid;
     if(msgs.length===0){
       msgList.innerHTML = `<div style="text-align:center;padding:24px;color:var(--text-muted);font-size:12px;line-height:1.8">No messages yet.<br>Be the first to say something! 👋</div>`;
+      renderTypingIndicator();
       return;
     }
     msgList.innerHTML = msgs.map((m,i)=>{
@@ -3765,6 +3877,7 @@ document.addEventListener('click',e=>{
         </div>
       </div>`;
     }).join('');
+    renderTypingIndicator();
     msgList.scrollTop = msgList.scrollHeight;
   }
 
@@ -3774,7 +3887,7 @@ document.addEventListener('click',e=>{
       return `<div class="crv-sign-in-bar">Join the conversation <button onclick="document.getElementById('loginModal')?.classList.add('open');window._crvChatClose()">Sign In</button></div>`;
     }
     return `<div class="crv-input-bar">
-      <textarea id="crvMsgInput" rows="1" placeholder="Message…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();window._crvSend(${dmMode});}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,80)+'px'"></textarea>
+      <textarea id="crvMsgInput" rows="1" placeholder="Message…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();window._crvSend(${dmMode});}" oninput="this.style.height='auto';this.style.height=Math.min(this.scrollHeight,80)+'px';window._crvNotifyTyping(${dmMode})"></textarea>
       <button class="crv-send-btn" onclick="window._crvSend(${dmMode})">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
       </button>
@@ -3790,6 +3903,8 @@ document.addEventListener('click',e=>{
     if(!text) return;
     const origText = inp.value;
     inp.value = ''; inp.style.height='auto';
+    clearTimeout(_typingSelfTimer);
+    window._crvStopTyping(isDM);
     const name = ((cud?.firstName||'')+' '+(cud?.lastName||'')).trim() || cu.displayName || cu.email?.split('@')[0] || 'User';
     const payload = {
       uid: cu.uid,
@@ -3915,6 +4030,7 @@ document.addEventListener('click',e=>{
     const convId = [cu.uid, _dmTarget.uid].sort().join('_');
     // Mark as read
     setDoc(doc(db,'communityDMs',convId), {[`unread_${cu.uid}`]:0}, {merge:true}).catch(()=>{});
+    subscribeTyping(true, convId);
     const q = query(collection(db,'communityDMs',convId,'messages'), orderBy('createdAt','asc'));
     _unsubDM = onSnapshot(q, snap=>{
       const msgs = snap.docs.map(d=>({id:d.id,...d.data()}));
@@ -3946,19 +4062,36 @@ document.addEventListener('click',e=>{
             `<button class="crv-voice-join-btn" onclick="window._crvJoinVoice()">🎙️ Join Voice Room</button>`
           }
         </div>
-        <div style="font-size:10px;color:var(--text-muted);text-align:center;padding:0 16px;line-height:1.6">
-          Voice presence lets others see you're online. Actual audio requires WebRTC integration.
+        <div style="font-size:10px;color:var(--text-muted);text-align:center;padding:0 16px;line-height:1.6" id="crvVoiceHint">
+          Live peer-to-peer audio via WebRTC. Your browser will ask for mic permission — allow it to be heard.
         </div>
       </div>`;
     subscribeVoiceRoom();
   }
 
   function subscribeVoiceRoom(){
+    if(_unsubVoice){ _unsubVoice(); _unsubVoice=null; }
     _unsubVoice = onSnapshot(collection(db,'communityVoice'), snap=>{
       _voiceUsers = {};
       snap.docs.forEach(d=>{ _voiceUsers[d.id]={id:d.id,...d.data()}; });
       renderVoiceUsers();
     }, ()=>{});
+  }
+
+  // Keeps peer connections in sync with the room roster even when the
+  // Voice tab isn't the one currently open — so calls don't drop just
+  // because someone switched to Channels/DMs while talking.
+  function startVoicePeerSync(){
+    if(_unsubVoicePresence) return;
+    _unsubVoicePresence = onSnapshot(collection(db,'communityVoice'), snap=>{
+      _voiceUsers = {};
+      snap.docs.forEach(d=>{ _voiceUsers[d.id]={id:d.id,...d.data()}; });
+      syncVoicePeers();
+      renderVoiceUsers();
+    }, ()=>{});
+  }
+  function stopVoicePeerSync(){
+    if(_unsubVoicePresence){ _unsubVoicePresence(); _unsubVoicePresence=null; }
   }
 
   function renderVoiceUsers(){
@@ -3979,9 +4112,123 @@ document.addEventListener('click',e=>{
       </div>`).join('');
   }
 
+  // ── WebRTC peer connections (mesh) ──────────────────────────
+  // Every pair of users in the room gets a Firestore doc for SDP
+  // signaling ("communityVoiceCalls/{pairId}") plus two candidate
+  // subcollections. Lower uid always initiates the offer, so both
+  // sides agree on caller/callee without extra coordination.
+  async function connectToPeer(peerUid){
+    const cu = window.CU;
+    if(!cu || !_localStream || _peerConnections[peerUid]) return;
+    const iAmCaller = cu.uid < peerUid;
+    const pairId = [cu.uid, peerUid].sort().join('_');
+    const pc = new RTCPeerConnection(ICE_SERVERS);
+    _peerConnections[peerUid] = pc;
+
+    _localStream.getTracks().forEach(t=>pc.addTrack(t, _localStream));
+
+    pc.ontrack = (e)=>{
+      let audioEl = _remoteAudioEls[peerUid];
+      if(!audioEl){
+        audioEl = document.createElement('audio');
+        audioEl.autoplay = true;
+        audioEl.id = 'crvVoiceAudio_'+peerUid;
+        audioEl.style.display = 'none';
+        document.body.appendChild(audioEl);
+        _remoteAudioEls[peerUid] = audioEl;
+      }
+      audioEl.srcObject = e.streams[0];
+    };
+
+    const callDocRef = doc(db,'communityVoiceCalls',pairId);
+    const callerCandidatesCol = collection(callDocRef,'callerCandidates');
+    const calleeCandidatesCol = collection(callDocRef,'calleeCandidates');
+
+    pc.onicecandidate = (e)=>{
+      if(!e.candidate) return;
+      addDoc(iAmCaller?callerCandidatesCol:calleeCandidatesCol, e.candidate.toJSON()).catch(()=>{});
+    };
+
+    const unsubs = [];
+
+    try{
+      if(iAmCaller){
+        await setDoc(callDocRef, { offer:null, answer:null, callerUid:cu.uid, calleeUid:peerUid, createdAt:serverTimestamp() });
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await setDoc(callDocRef, { offer:{type:offer.type, sdp:offer.sdp} }, {merge:true});
+
+        unsubs.push(onSnapshot(callDocRef, snap=>{
+          const data = snap.data();
+          if(data?.answer && !pc.currentRemoteDescription){
+            pc.setRemoteDescription(new RTCSessionDescription(data.answer)).catch(()=>{});
+          }
+        }));
+        unsubs.push(onSnapshot(calleeCandidatesCol, snap=>{
+          snap.docChanges().forEach(ch=>{
+            if(ch.type==='added') pc.addIceCandidate(new RTCIceCandidate(ch.doc.data())).catch(()=>{});
+          });
+        }));
+      } else {
+        unsubs.push(onSnapshot(callDocRef, async snap=>{
+          const data = snap.data();
+          if(data?.offer && !pc.currentRemoteDescription){
+            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            await setDoc(callDocRef, { answer:{type:answer.type, sdp:answer.sdp} }, {merge:true});
+          }
+        }));
+        unsubs.push(onSnapshot(callerCandidatesCol, snap=>{
+          snap.docChanges().forEach(ch=>{
+            if(ch.type==='added') pc.addIceCandidate(new RTCIceCandidate(ch.doc.data())).catch(()=>{});
+          });
+        }));
+      }
+    }catch(e){ console.warn('[Creativo Voice] signaling error with', peerUid, e); }
+
+    _peerUnsubs[peerUid] = unsubs;
+  }
+
+  function disconnectPeer(peerUid){
+    const pc = _peerConnections[peerUid];
+    if(pc){ try{ pc.close(); }catch(e){} delete _peerConnections[peerUid]; }
+    if(_peerUnsubs[peerUid]){ _peerUnsubs[peerUid].forEach(u=>u()); delete _peerUnsubs[peerUid]; }
+    const audioEl = _remoteAudioEls[peerUid];
+    if(audioEl){ audioEl.srcObject=null; audioEl.remove(); delete _remoteAudioEls[peerUid]; }
+  }
+
+  function disconnectAllPeers(){
+    Object.keys(_peerConnections).forEach(disconnectPeer);
+  }
+
+  // Called whenever the voice-room roster changes: connect to
+  // anyone new, drop anyone who left.
+  function syncVoicePeers(){
+    const cu = window.CU;
+    if(!_voiceActive || !cu || !_localStream) return;
+    const currentUids = Object.keys(_voiceUsers).filter(uid=>uid!==cu.uid);
+    currentUids.forEach(uid=>{ if(!_peerConnections[uid]) connectToPeer(uid); });
+    Object.keys(_peerConnections).forEach(uid=>{
+      if(!currentUids.includes(uid)) disconnectPeer(uid);
+    });
+  }
+
   window._crvJoinVoice = async function(){
     const cu = window.CU; const cud = window.CUD;
     if(!cu) return;
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      if(typeof showToast==='function') showToast('This browser does not support voice chat');
+      return;
+    }
+    const hint = document.getElementById('crvVoiceHint');
+    if(hint) hint.textContent = 'Requesting microphone access…';
+    try{
+      _localStream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:true, noiseSuppression:true, autoGainControl:true } });
+    }catch(e){
+      if(typeof showToast==='function') showToast('🔇 Microphone permission denied — enable it in browser settings');
+      return;
+    }
     const name = ((cud?.firstName||'')+' '+(cud?.lastName||'')).trim() || cu.email?.split('@')[0] || 'User';
     _voiceActive = true; _micActive = true;
     await setDoc(doc(db,'communityVoice',cu.uid),{
@@ -3989,11 +4236,15 @@ document.addEventListener('click',e=>{
     });
     const body = document.getElementById('crvChatBody');
     if(body) renderVoice(body);
+    startVoicePeerSync();
   };
 
   window._crvLeaveVoice = async function(){
     const cu = window.CU; if(!cu) return;
     _voiceActive = false; _micActive = false;
+    stopVoicePeerSync();
+    disconnectAllPeers();
+    if(_localStream){ _localStream.getTracks().forEach(t=>t.stop()); _localStream=null; }
     await deleteDoc(doc(db,'communityVoice',cu.uid)).catch(()=>{});
     const body = document.getElementById('crvChatBody');
     if(body) renderVoice(body);
@@ -4002,6 +4253,7 @@ document.addEventListener('click',e=>{
   window._crvToggleMic = async function(){
     const cu = window.CU; if(!cu) return;
     _micActive = !_micActive;
+    if(_localStream) _localStream.getAudioTracks().forEach(t=>{ t.enabled = _micActive; });
     await updateDoc(doc(db,'communityVoice',cu.uid),{muted:!_micActive}).catch(()=>{});
     const btn = document.getElementById('crvMicBtn');
     if(btn){ btn.textContent = _micActive?'🎙️':'🔇'; btn.classList.toggle('muted',!_micActive); }
@@ -4010,6 +4262,9 @@ document.addEventListener('click',e=>{
   // Leave voice on page unload
   window.addEventListener('beforeunload',()=>{
     if(_voiceActive && window.CU){
+      stopVoicePeerSync();
+      disconnectAllPeers();
+      if(_localStream) _localStream.getTracks().forEach(t=>t.stop());
       deleteDoc(doc(db,'communityVoice',window.CU.uid)).catch(()=>{});
     }
   });
